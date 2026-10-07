@@ -105,6 +105,25 @@ Trade-offs and prerequisites:
 - If the forge does not detect a PR as merged within ~10s of the fast-forward,
   gitea-mq closes it with a "Merged as `<sha>`" comment.
 
+## Issue dependencies (Gitea)
+
+Gitea refuses to merge a PR that depends on an open issue or PR ("blocked by"),
+but only when Gitea performs the merge. Batches land by fast-forwarding the
+target branch, which bypasses that check, so gitea-mq enforces it itself:
+
+- A PR with an open dependency is not enqueued. Its `gitea-mq` status shows
+  `Blocked by open dependency #N` and its merge intent (auto-merge or label) is
+  kept, so it enters the queue on its own once the dependency closes.
+- A queued PR that gains an open dependency is removed from the queue, again
+  without cancelling its merge intent.
+- Right before a batch lands, every member is checked once more; members that
+  gained a dependency while the batch was testing are held back and the rest is
+  tested again.
+
+The token must be able to read every repository a dependency may point to:
+Gitea leaves out dependencies the caller cannot read. Repositories with
+dependencies disabled are treated as having none.
+
 ## Repo selection
 
 There are three ways to tell gitea-mq which repos to manage.

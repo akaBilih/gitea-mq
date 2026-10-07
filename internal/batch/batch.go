@@ -230,6 +230,24 @@ func (e *Engine) HandlePass(ctx context.Context, b *pg.Batch) error {
 	if b.State != pg.BatchStateTesting {
 		return nil
 	}
+	members, err := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
+	if err != nil {
+		return err
+	}
+	// A dependency added while the batch was testing: the forge would refuse
+	// to merge those PRs, and the fast-forward below would not. Hold them back
+	// and test the rest again.
+	held, err := e.holdBlocked(ctx, b, members)
+	if err != nil {
+		return err
+	}
+	if held {
+		if len(b.CurrentIds) == 0 {
+			return e.next(ctx, b)
+		}
+		return e.rebuild(ctx, b)
+	}
+
 	sha := b.BranchSha.String
 	if err := e.Forge.FastForward(ctx, e.Owner, e.Repo, b.TargetBranch, sha); err != nil {
 		var denied *forge.PushDeniedError
@@ -584,4 +602,45 @@ func ids(entries []pg.QueueEntry) []int64 {
 		out[i] = e.ID
 	}
 	return out
+}
+
+// holdBlocked drops the current members whose PR has an open dependency,
+// keeping their merge intent: the poller takes them back once the dependency
+// closes. Every lookup happens before anything changes, so a forge error leaves
+// the batch as it was and the pass is retried with the next check.
+func (e *Engine) holdBlocked(ctx context.Context, b *pg.Batch, entries []pg.QueueEntry) (bool, error) {
+	blocked := make(map[int64][]forge.Dependency)
+	for i := range entries {
+		deps, err := forge.OpenDependencies(ctx, e.Forge, e.Owner, e.Repo, entries[i].PrNumber)
+		if err != nil {
+			return false, fmt.Errorf("check dependencies of PR #%d: %w", entries[i].PrNumber, err)
+		}
+		if len(deps) > 0 {
+			blocked[entries[i].ID] = deps
+		}
+	}
+	if len(blocked) == 0 {
+		return false, nil
+	}
+
+	for i := range entries {
+		ent := &entries[i]
+		deps, ok := blocked[ent.ID]
+		if !ok {
+			continue
+		}
+		logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
+			State: pg.CheckStatePending, Description: forge.BlockedStatus(deps, e.Owner, e.Repo), TargetURL: e.prURL(ent.PrNumber),
+		}), "set mq status failed", "pr", ent.PrNumber)
+		logutil.WarnIfErr(e.Forge.Comment(ctx, e.Owner, e.Repo, ent.PrNumber, forge.BlockedComment(deps, e.Owner, e.Repo)),
+			"post comment failed", "pr", ent.PrNumber)
+		// The next SaveBatch deletes EjectedIds from the queue.
+		b.EjectedIds = append(b.EjectedIds, ent.ID)
+	}
+	b.CurrentIds = slices.DeleteFunc(b.CurrentIds, func(id int64) bool {
+		_, ok := blocked[id]
+		return ok
+	})
+	slog.Info("batch members held back by open dependencies", "batch", b.ID, "held", len(blocked), "current", len(b.CurrentIds))
+	return true, nil
 }

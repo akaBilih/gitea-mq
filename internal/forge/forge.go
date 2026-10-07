@@ -305,3 +305,63 @@ type UnknownForgeError struct {
 func (e *UnknownForgeError) Error() string {
 	return fmt.Sprintf("forge: no adapter registered for kind %q", e.Kind)
 }
+
+// Dependency is an issue or pull request that a PR depends on and that is
+// still open. While a PR has one, the forge itself refuses to merge it (Gitea's
+// "blocked by") — but gitea-mq lands batches by fast-forwarding the target, so
+// it must refuse too.
+type Dependency struct {
+	Repo    string // "owner/name"; empty means the PR's own repository
+	Number  int64
+	HTMLURL string
+}
+
+// Ref renders the dependency the way the forge links it: "#N" in the PR's own
+// repository, "owner/name#N" elsewhere.
+func (d Dependency) Ref(owner, name string) string {
+	if d.Repo == "" || strings.EqualFold(d.Repo, owner+"/"+name) {
+		return fmt.Sprintf("#%d", d.Number)
+	}
+	return fmt.Sprintf("%s#%d", d.Repo, d.Number)
+}
+
+// DependencyRefs joins the refs of deps, e.g. "#12, #15".
+func DependencyRefs(deps []Dependency, owner, name string) string {
+	refs := make([]string, len(deps))
+	for i, d := range deps {
+		refs[i] = d.Ref(owner, name)
+	}
+	return strings.Join(refs, ", ")
+}
+
+// DependencyResolver is optionally implemented by forges with native issue
+// dependencies (Gitea). OpenDependencies returns the PR's dependencies that are
+// still open; closed ones (merged or not) no longer block, as on the forge.
+type DependencyResolver interface {
+	OpenDependencies(ctx context.Context, owner, name string, number int64) ([]Dependency, error)
+}
+
+// OpenDependencies looks up the PR's open dependencies when the forge supports
+// them, and reports none when it does not.
+func OpenDependencies(ctx context.Context, f Forge, owner, name string, number int64) ([]Dependency, error) {
+	dr, ok := f.(DependencyResolver)
+	if !ok {
+		return nil, nil
+	}
+	return dr.OpenDependencies(ctx, owner, name, number)
+}
+
+// BlockedStatus is the MQ status description of a PR held back because it has
+// open dependencies. The forge's own merge box does not say why it cannot
+// merge, so this is where the reason shows.
+func BlockedStatus(deps []Dependency, owner, name string) string {
+	return "Blocked by open dependency " + DependencyRefs(deps, owner, name)
+}
+
+// BlockedComment explains why a queued PR was taken out of the queue without
+// cancelling its merge intent.
+func BlockedComment(deps []Dependency, owner, name string) string {
+	return fmt.Sprintf("⏸️ Removed from merge queue: this PR depends on %s, which is still open. "+
+		"The merge stays scheduled: the PR re-enters the queue on its own once that is closed.",
+		DependencyRefs(deps, owner, name))
+}

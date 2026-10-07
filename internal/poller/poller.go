@@ -64,6 +64,9 @@ type Deps struct {
 
 	// hintedSHAs dedupes stack-hint statuses per head SHA.
 	hintedSHAs map[string]bool
+	// blockedStatus dedupes "blocked by dependency" statuses: head SHA -> the
+	// description last posted for it.
+	blockedStatus map[string]string
 }
 
 func (d *Deps) now() time.Time {
@@ -305,6 +308,19 @@ func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR
 		return
 	}
 
+	// A PR the forge would refuse to merge must not reach a batch: gitea-mq
+	// lands batches by fast-forwarding the target, which skips that refusal.
+	// The merge intent is left alone, so the PR is taken once they close.
+	blockers, err := forge.OpenDependencies(ctx, deps.Forge, deps.Owner, deps.Repo, pr.Number)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", pr.Number, err))
+		return
+	}
+	if len(blockers) > 0 {
+		markBlocked(ctx, deps, pr.Number, pr.HeadSHA, blockers)
+		return
+	}
+
 	enqResult, err := deps.Queue.Enqueue(ctx, deps.RepoID, pr.Number, pr.HeadSHA, targetBranch)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("enqueue PR #%d: %w", pr.Number, err))
@@ -312,6 +328,7 @@ func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR
 	}
 
 	if enqResult.IsNew {
+		delete(deps.blockedStatus, pr.HeadSHA)
 		desc := fmt.Sprintf("Queued (position #%d)", enqResult.Position)
 		targetURL := forge.DashboardPRURL(deps.ExternalURL, deps.Forge.Kind(), deps.Owner, deps.Repo, pr.Number)
 		if err := deps.Forge.SetMQStatus(ctx, deps.Owner, deps.Repo, pr.HeadSHA, forge.MQStatus{
@@ -537,6 +554,9 @@ func reconcileEntries(ctx context.Context, deps *Deps, result *PollResult, openP
 					result.Errors = append(result.Errors, fmt.Errorf("batch member removed PR #%d: %w", entry.PrNumber, err))
 				}
 			}
+			continue
+		}
+		if isOpen && holdIfBlocked(ctx, deps, result, &entry) {
 			continue
 		}
 		finalizeLabeledMerge(ctx, deps, result, &entry, pr)
@@ -781,4 +801,59 @@ func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) 
 			notifyTickDone(deps)
 		}
 	}
+}
+
+// markBlocked shows on the PR head why gitea-mq is not taking it. Deduped per
+// head SHA so a PR waiting for a dependency does not collect a status per poll.
+func markBlocked(ctx context.Context, deps *Deps, number int64, sha string, blockers []forge.Dependency) {
+	desc := forge.BlockedStatus(blockers, deps.Owner, deps.Repo)
+	if deps.blockedStatus[sha] == desc {
+		return
+	}
+	targetURL := forge.DashboardPRURL(deps.ExternalURL, deps.Forge.Kind(), deps.Owner, deps.Repo, number)
+	if err := deps.Forge.SetMQStatus(ctx, deps.Owner, deps.Repo, sha, forge.MQStatus{
+		State: pg.CheckStatePending, Description: desc, TargetURL: targetURL,
+	}); err != nil {
+		slog.Warn("set blocked status failed", "pr", number, "error", err)
+		return
+	}
+	if deps.blockedStatus == nil {
+		deps.blockedStatus = make(map[string]string)
+	}
+	deps.blockedStatus[sha] = desc
+}
+
+// holdIfBlocked takes an entry out of the queue when its PR gained an open
+// dependency after it was queued. Unlike every other removal the merge intent
+// is kept: enqueuePR takes the PR back on its own once the dependency closes.
+// A batch member that is already testing is also caught by the batch engine
+// right before landing; this catches it as soon as the next poll runs.
+func holdIfBlocked(ctx context.Context, deps *Deps, result *PollResult, entry *pg.QueueEntry) bool {
+	blockers, err := forge.OpenDependencies(ctx, deps.Forge, deps.Owner, deps.Repo, entry.PrNumber)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", entry.PrNumber, err))
+		return false
+	}
+	if len(blockers) == 0 {
+		return false
+	}
+
+	if err := removePR(ctx, deps, result, entry, removeOpts{
+		comment:  forge.BlockedComment(blockers, deps.Owner, deps.Repo),
+		advance:  true,
+		logMsg:   "removed PR blocked by an open dependency",
+		logAttrs: []any{"dependencies", forge.DependencyRefs(blockers, deps.Owner, deps.Repo)},
+	}); err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("dequeue blocked PR #%d: %w", entry.PrNumber, err))
+	}
+	// The queue's own statuses replaced any earlier one: post it again.
+	delete(deps.blockedStatus, entry.PrHeadSha)
+	markBlocked(ctx, deps, entry.PrNumber, entry.PrHeadSha, blockers)
+
+	if entry.ActiveBatchID.Valid && deps.Batch != nil {
+		if err := deps.Batch.OnMemberRemoved(ctx, entry.TargetBranch, entry.ActiveBatchID.Int64, entry.ID); err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("batch member removed PR #%d: %w", entry.PrNumber, err))
+		}
+	}
+	return true
 }

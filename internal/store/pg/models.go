@@ -18,6 +18,7 @@ const (
 	BatchStateTesting   BatchState = "testing"
 	BatchStateDone      BatchState = "done"
 	BatchStateCancelled BatchState = "cancelled"
+	BatchStateHeld      BatchState = "held"
 )
 
 func (e *BatchState) Scan(src interface{}) error {
@@ -186,6 +187,7 @@ type QueueEntry struct {
 	MergeBranchSha   pgtype.Text        `json:"merge_branch_sha"`
 	ErrorMessage     pgtype.Text        `json:"error_message"`
 	ActiveBatchID    pgtype.Int8        `json:"active_batch_id"`
+	Waiting          bool               `json:"waiting"`
 }
 
 type Repo struct {

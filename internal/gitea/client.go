@@ -280,12 +280,18 @@ type Client interface {
 
 // Issue is the subset of an issue or PR returned by the dependencies endpoint.
 type Issue struct {
-	Index      int64      `json:"number"`
-	State      string     `json:"state"` // "open", "closed"
-	Repository *IssueRepo `json:"repository"`
+	Index       int64             `json:"number"`
+	State       string            `json:"state"` // "open", "closed"
+	Repository  *IssueRepo        `json:"repository"`
+	PullRequest *IssuePullRequest `json:"pull_request"` // nil for a plain issue
 }
 
 // IssueRepo identifies the repository an Issue belongs to.
 type IssueRepo struct {
 	FullName string `json:"full_name"`
+}
+
+// IssuePullRequest is present when an Issue is a pull request.
+type IssuePullRequest struct {
+	Merged bool `json:"merged"`
 }

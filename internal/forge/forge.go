@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 
 	"github.com/Mic92/gitea-mq/internal/store/pg"
@@ -310,14 +311,61 @@ func (e *UnknownForgeError) Error() string {
 type Dependency struct {
 	Repo   string // "owner/name"; empty means the PR's own repository
 	Number int64
+	PR     bool // a pull request rather than an issue
+}
+
+func (d Dependency) inRepo(owner, name string) bool {
+	return d.Repo == "" || strings.EqualFold(d.Repo, owner+"/"+name)
 }
 
 // Ref renders "#N" in the PR's own repository, "owner/name#N" elsewhere.
 func (d Dependency) Ref(owner, name string) string {
-	if d.Repo == "" || strings.EqualFold(d.Repo, owner+"/"+name) {
+	if d.inRepo(owner, name) {
 		return fmt.Sprintf("#%d", d.Number)
 	}
 	return fmt.Sprintf("%s#%d", d.Repo, d.Number)
+}
+
+// BranchGuard tells whether closing a dependency can move a branch of one
+// repository: only merging a pull request of that repository into the branch
+// can, so issues and pull requests elsewhere never do. It remembers the base
+// branch of every pull request it looks up, so when many PRs wait on the same
+// one a reconcile asks the forge once.
+type BranchGuard struct {
+	f           Forge
+	owner, name string
+	bases       map[int64]string
+}
+
+// NewBranchGuard returns a guard for owner/name. Use one per reconcile: a
+// pull request can be retargeted.
+func NewBranchGuard(f Forge, owner, name string) *BranchGuard {
+	return &BranchGuard{f: f, owner: owner, name: name, bases: map[int64]string{}}
+}
+
+// CanMove reports whether closing any of deps can move one of branches. A pull
+// request whose base is unknown counts as able to.
+func (g *BranchGuard) CanMove(ctx context.Context, deps []Dependency, branches ...string) (bool, error) {
+	for _, d := range deps {
+		if !d.PR || !d.inRepo(g.owner, g.name) {
+			continue
+		}
+		base, ok := g.bases[d.Number]
+		if !ok {
+			pr, err := g.f.GetPR(ctx, g.owner, g.name, d.Number)
+			if err != nil {
+				return true, fmt.Errorf("get dependency #%d: %w", d.Number, err)
+			}
+			if pr != nil {
+				base = pr.BaseBranch
+			}
+			g.bases[d.Number] = base
+		}
+		if base == "" || slices.Contains(branches, base) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // DependencyRefs joins the refs of deps, e.g. "#12, #15".
@@ -348,6 +396,18 @@ func OpenDependencies(ctx context.Context, f Forge, owner, name string, number i
 // dependencies.
 func BlockedStatus(deps []Dependency, owner, name string) string {
 	return "Blocked by open dependency " + DependencyRefs(deps, owner, name)
+}
+
+// WaitingStatus describes a blocked PR that is queued to be tested while its
+// dependencies are open.
+func WaitingStatus(deps []Dependency, owner, name string) string {
+	return BlockedStatus(deps, owner, name) + "; testing it meanwhile"
+}
+
+// HeldStatus describes a member of a batch that passed CI and lands once its
+// dependencies close.
+func HeldStatus(batchID int64, deps []Dependency, owner, name string) string {
+	return fmt.Sprintf("Batch #%d passed; lands once %s is closed", batchID, DependencyRefs(deps, owner, name))
 }
 
 // BlockedComment explains why a queued PR left the queue with its merge intent

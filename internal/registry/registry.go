@@ -42,6 +42,7 @@ type Deps struct {
 	SkipQueueIfUpToDate bool
 	BatchMax            int
 	BisectMaxSteps      int
+	TestWhileBlocked    bool
 }
 
 // RepoRegistry manages the set of active repos. Thread-safe for concurrent
@@ -109,19 +110,20 @@ func (r *RepoRegistry) Add(ctx context.Context, ref forge.RepoRef) error {
 	var batchEngine *batch.Engine
 	if r.deps.BatchMax != 1 {
 		batchEngine = &batch.Engine{
-			Forge:          f,
-			Queue:          r.deps.Queue,
-			Owner:          ref.Owner,
-			Repo:           ref.Name,
-			RepoID:         repo.ID,
-			ExternalURL:    r.deps.ExternalURL,
-			BatchMax:       r.deps.BatchMax,
-			BisectMaxSteps: r.deps.BisectMaxSteps,
-			CheckTimeout:   r.deps.CheckTimeout,
-			FallbackChecks: r.deps.FallbackChecks,
-			MergeLabel:     r.deps.MergeLabel,
-			SkipIfUpToDate: r.deps.SkipQueueIfUpToDate,
-			Advance:        triggerPoll,
+			Forge:            f,
+			Queue:            r.deps.Queue,
+			Owner:            ref.Owner,
+			Repo:             ref.Name,
+			RepoID:           repo.ID,
+			ExternalURL:      r.deps.ExternalURL,
+			BatchMax:         r.deps.BatchMax,
+			BisectMaxSteps:   r.deps.BisectMaxSteps,
+			TestWhileBlocked: r.deps.TestWhileBlocked,
+			CheckTimeout:     r.deps.CheckTimeout,
+			FallbackChecks:   r.deps.FallbackChecks,
+			MergeLabel:       r.deps.MergeLabel,
+			SkipIfUpToDate:   r.deps.SkipQueueIfUpToDate,
+			Advance:          triggerPoll,
 		}
 	}
 

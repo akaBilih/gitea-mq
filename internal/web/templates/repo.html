@@ -16,7 +16,7 @@
     <div class="section batch-header">
         📦 Batch #{{.ID}} ·
         {{if .BranchURL}}<a href="{{.BranchURL}}">{{.BranchName}}</a>{{else}}{{.BranchName}}{{end}}
-        · build {{.Builds}} · {{if .Held}}passed, held for dependencies {{else}}testing {{end}}{{.Current}}/{{.Members}} → {{.TargetBranch}}
+        · build {{.Builds}} · {{if .Held}}{{.HeldCount}} passed, held for dependencies{{else}}testing {{.Current}}{{if .HeldCount}} on top of {{.HeldCount}} passed{{end}}{{end}} of {{.Members}} → {{.TargetBranch}}
     </div>
     {{end}}
 

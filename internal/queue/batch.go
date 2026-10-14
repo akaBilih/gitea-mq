@@ -168,12 +168,59 @@ func saveBatch(ctx context.Context, q *pg.Queries, b *pg.Batch) error {
 		FfRetries:        b.FfRetries,
 		Flaky:            b.Flaky,
 		TestingStartedAt: b.TestingStartedAt,
+		HeldIds:          nn(b.HeldIds),
+		HeldSha:          b.HeldSha,
 	})
 	if err != nil {
 		return err
 	}
 	*b = saved
 	return nil
+}
+
+// ExtendBatch atomically takes up to max waiting entries queued for b's
+// branch into b as its next layer: they become current_ids, join member_ids,
+// and are marked testing with active_batch_id set. Returns false when none
+// is queued. max <= 0 means "all of them".
+func (s *Service) ExtendBatch(ctx context.Context, b *pg.Batch, max int) (bool, error) {
+	if max <= 0 {
+		max = 1 << 30
+	}
+	var (
+		extended bool
+		saved    pg.Batch
+	)
+	err := s.withTx(ctx, func(q *pg.Queries) error {
+		entries, err := q.TakeQueuedHead(ctx, pg.TakeQueuedHeadParams{
+			RepoID:       b.RepoID,
+			TargetBranch: b.TargetBranch,
+			Waiting:      true,
+			Limit:        int32(max),
+		})
+		if err != nil || len(entries) == 0 {
+			return err
+		}
+		ids := make([]int64, len(entries))
+		for i, e := range entries {
+			ids[i] = e.ID
+		}
+		if saved, err = q.ExtendBatchMembers(ctx, pg.ExtendBatchMembersParams{ID: b.ID, Ids: ids}); err != nil {
+			return fmt.Errorf("extend batch: %w", err)
+		}
+		if err := q.SetEntryActiveBatch(ctx, pg.SetEntryActiveBatchParams{
+			ActiveBatchID: pgtype.Int8{Int64: b.ID, Valid: true},
+			Ids:           ids,
+		}); err != nil {
+			return fmt.Errorf("set active batch: %w", err)
+		}
+		extended = true
+		return nil
+	})
+	if err != nil || !extended {
+		return false, err
+	}
+	*b = saved
+	return true, nil
 }
 
 // GetEntriesByIDs loads queue entries by primary key, preserving the input

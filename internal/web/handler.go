@@ -127,6 +127,7 @@ type RepoDetailBatch struct {
 	Current      int
 	Members      int
 	Held         bool // passed, waiting for its members' dependencies
+	HeldCount    int  // members passed and waiting; a testing layer builds on them
 }
 
 // RepoDetailData is the template data for the repo detail page.
@@ -340,6 +341,7 @@ func serveRepoDetail(w http.ResponseWriter, r *http.Request, deps *Deps, ref for
 			Current:      len(b.CurrentIds),
 			Members:      len(b.MemberIds),
 			Held:         b.State == pg.BatchStateHeld,
+			HeldCount:    len(b.HeldIds),
 		}
 		if f != nil && rb.BranchName != "" {
 			rb.BranchURL = f.BranchHTMLURL(owner, name, rb.BranchName)

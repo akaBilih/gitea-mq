@@ -33,13 +33,17 @@ func newFakeForge() *fakeForge {
 		merged:    map[int64]bool{},
 	}
 	var tip string
-	f.CreateMergeBranchFn = func(_ context.Context, _, _, _, head, _ string) (string, bool, error) {
+	f.CreateMergeBranchFn = func(_ context.Context, _, _, base, head, _ string) (string, bool, error) {
 		if f.conflict[head] {
 			return "", true, nil
 		}
 		// Seed from the live target tip so each rebuild reflects what
-		// HandlePass already landed.
-		tip = fmt.Sprintf("m(%s,%s)", f.target, head)
+		// HandlePass already landed; a layer is built on a passed SHA.
+		from := f.target
+		if base != "main" {
+			from = base
+		}
+		tip = fmt.Sprintf("m(%s,%s)", from, head)
 		return tip, false, nil
 	}
 	f.MergeIntoFn = func(_ context.Context, _, _, _, head string) (string, bool, error) {

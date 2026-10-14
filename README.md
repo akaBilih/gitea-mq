@@ -144,21 +144,25 @@ another CI run:
 - Waiting PRs are batched among themselves, and only when nothing that may land
   is queued for that branch.
 - A batch that passes while its members are still blocked is **held**: it keeps
-  the branch's batch slot and its tested SHA. Once every member's dependencies
-  are closed it lands by fast-forward; the fast-forward only succeeds if the
-  target has not moved, so what lands is exactly what CI tested.
-- A held batch gives way at once: it is dissolved (members go back to the
-  queue, in place) when a PR that may land is queued, when the target branch
-  moves (they are tested again on the new tip), or when a PR newly blocked on a
-  dependency joins the queue and the batch has room (they are tested together,
-  so they all land at once).
-- Bisecting such a batch cannot land a passing half to build the next one on,
-  so the half goes back to the queue and the last passing half is held. A half
-  sent back is not re-batched with it until something changes, so a pair of
-  PRs that only fail together cannot loop; one lands first and the other is
-  tested on top of it.
+  the branch's batch slot and its tested SHA, and behaves as if it had landed.
+  Waiting PRs queued after it are tested as **layers** of up to
+  `GITEA_MQ_BATCH_MAX` on top of that SHA, and every layer that passes joins the
+  held set; what is already held is never tested again, so the stack grows by
+  one CI run per layer and is not capped by `GITEA_MQ_BATCH_MAX`.
+- A failing layer, or a failing first batch, is bisected exactly as a landing
+  one: a passing half stays in the tree as if it had landed, the next half is
+  tested on top of it, and the culprit is removed from the queue.
+- Once every held PR's dependencies are closed, the whole stack lands with one
+  fast-forward to its top. A fast-forward only succeeds if the target has not
+  moved, so what lands is exactly what CI tested.
+- The stack gives way at once: it is dissolved (members go back to the queue,
+  in place) when a PR that may land is queued, or when the target branch moves
+  (they are tested again on the new tip, layer by layer). A held PR closed or
+  pushed to also dissolves it, since the tested tree contained it.
 - A batch member that gains such a dependency while testing goes back to the
   queue as waiting instead of leaving it with a comment.
+- `GITEA_MQ_BISECT_MAX_STEPS` counts the builds of the whole stack, layers
+  included.
 
 Repos with waiting PRs are polled every `GITEA_MQ_POLL_INTERVAL`, which is how
 the closing of a dependency (no webhook reports it) is noticed. Switching the

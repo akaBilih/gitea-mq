@@ -669,3 +669,75 @@ func TestRun_TriggerPollsIdleRepo(t *testing.T) {
 		t.Fatalf("triggered idle repo polled forge %d times, want 2", listed)
 	}
 }
+
+// A reconcile the forge did not answer must not count as the idle repo's
+// periodic one: the next tick retries instead of waiting a whole idle
+// interval with a PR that went green still unqueued.
+func TestRun_FailedPollRetriedOnNextTick(t *testing.T) {
+	deps, mock, _, ctx, _ := setupPollerTest(t)
+	deps.IdleGating = true
+
+	var listed int
+	mock.ListOpenPRsFn = func(_ context.Context, _, _ string) ([]gitea.PR, error) {
+		listed++
+		if listed == 1 {
+			return nil, fmt.Errorf("502 Bad Gateway")
+		}
+		return nil, nil
+	}
+
+	runPollerTicks(ctx, deps, 3)
+
+	// Failed startup poll, retried on the first tick despite the 1h idle
+	// interval; idle again once the forge answered.
+	if listed != 2 {
+		t.Fatalf("polled forge %d times, want 2 (failed startup + one retry)", listed)
+	}
+}
+
+// Same for a webhook-triggered reconcile: the webhook is not delivered again,
+// so the next tick is the only retry before the idle interval.
+func TestRun_FailedTriggeredPollRetriedOnNextTick(t *testing.T) {
+	deps, mock, _, ctx, _ := setupPollerTest(t)
+	deps.IdleGating = true
+
+	trigger := make(chan struct{})
+	ticks := make(chan time.Time)
+	tickDone := make(chan struct{})
+	deps.Trigger = trigger
+	deps.Ticks = ticks
+	deps.TickDone = tickDone
+
+	var listed int
+	mock.ListOpenPRsFn = func(_ context.Context, _, _ string) ([]gitea.PR, error) {
+		listed++
+		if listed == 2 {
+			return nil, fmt.Errorf("502 Bad Gateway")
+		}
+		return nil, nil
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	done := make(chan struct{})
+	go func() {
+		poller.Run(runCtx, deps, time.Hour, time.Hour)
+		close(done)
+	}()
+
+	trigger <- struct{}{}
+	<-tickDone
+	for range 2 {
+		ticks <- time.Now()
+		<-tickDone
+	}
+	cancel()
+	<-done
+
+	// Startup poll, failed triggered poll, retry on the first tick; the
+	// second tick finds the repo idle again.
+	if listed != 3 {
+		t.Fatalf("polled forge %d times, want 3", listed)
+	}
+}

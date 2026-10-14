@@ -344,6 +344,23 @@ func OpenDependencies(ctx context.Context, f Forge, owner, name string, number i
 	return dr.OpenDependencies(ctx, owner, name, number)
 }
 
+// PushChecker is optionally implemented by forges that can tell whether
+// gitea-mq may push to a branch. The batch engine lands by pushing to the
+// target, which a branch reserved for human merges does not allow.
+type PushChecker interface {
+	CanPush(ctx context.Context, owner, name, branch string) (bool, error)
+}
+
+// CanPush reports whether gitea-mq may push to branch. Forges that cannot tell
+// are assumed to allow it, as the batch engine always has.
+func CanPush(ctx context.Context, f Forge, owner, name, branch string) (bool, error) {
+	pc, ok := f.(PushChecker)
+	if !ok {
+		return true, nil
+	}
+	return pc.CanPush(ctx, owner, name, branch)
+}
+
 // BlockedStatus is the MQ status description of a PR held back by open
 // dependencies.
 func BlockedStatus(deps []Dependency, owner, name string) string {

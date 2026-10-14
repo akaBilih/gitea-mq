@@ -681,8 +681,15 @@ func startQueuedHeads(ctx context.Context, deps *Deps, result *PollResult) {
 			continue
 		}
 
-		// The batch engine handles up-to-date heads itself (SkipIfUpToDate).
+		// The batch engine handles up-to-date heads itself (SkipIfUpToDate) by
+		// fast-forwarding the target. On a branch gitea-mq may not push to it
+		// would only be refused, so the forge merges the PR instead, as before
+		// the engine landed them.
 		if deps.Batch.Enabled() {
+			if deps.SkipQueueIfUpToDate && !canPushTarget(ctx, deps, result, entry.TargetBranch) &&
+				tryFastForwardSuccess(ctx, deps, result, head) {
+				continue
+			}
 			if _, err := deps.Batch.FormAndBuild(ctx, entry.TargetBranch); err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("form batch for %s: %w", entry.TargetBranch, err))
 			}
@@ -706,6 +713,17 @@ func startQueuedHeads(ctx context.Context, deps *Deps, result *PollResult) {
 			slog.Info("started testing for head-of-queue", "pr", head.PrNumber, "branch", startResult.MergeBranchName)
 		}
 	}
+}
+
+// canPushTarget reports whether gitea-mq may push to branch. A failed lookup
+// counts as allowed, which keeps the batch engine's own behaviour.
+func canPushTarget(ctx context.Context, deps *Deps, result *PollResult, branch string) bool {
+	ok, err := forge.CanPush(ctx, deps.Forge, deps.Owner, deps.Repo, branch)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("check push access to %s: %w", branch, err))
+		return true
+	}
+	return ok
 }
 
 // tryFastForwardSuccess promotes head straight to success when it already

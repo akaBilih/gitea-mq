@@ -37,6 +37,7 @@ type MockClient struct {
 	AddIssueLabelsFn          func(ctx context.Context, owner, repo string, index int64, labelIDs []int64) ([]Label, error)
 	GetBranchProtectionFn     func(ctx context.Context, owner, repo, branch string) (*BranchProtection, error)
 	ListBranchesFn            func(ctx context.Context, owner, repo string) ([]Branch, error)
+	GetBranchFn               func(ctx context.Context, owner, repo, branch string) (*Branch, error)
 	CreateBranchFn            func(ctx context.Context, owner, repo, name, target string) error
 	DeleteBranchFn            func(ctx context.Context, owner, repo, name string) error
 	CompareCommitsFn          func(ctx context.Context, owner, repo, base, head string) (*Compare, error)
@@ -244,6 +245,17 @@ func (m *MockClient) ListBranches(ctx context.Context, owner, repo string) ([]Br
 	}
 
 	return nil, nil
+}
+
+// GetBranch defaults to a branch the token may push to.
+func (m *MockClient) GetBranch(ctx context.Context, owner, repo, branch string) (*Branch, error) {
+	m.record("GetBranch", owner, repo, branch)
+
+	if m.GetBranchFn != nil {
+		return m.GetBranchFn(ctx, owner, repo, branch)
+	}
+
+	return &Branch{Name: branch, UserCanPush: true}, nil
 }
 
 func (m *MockClient) CreateBranch(ctx context.Context, owner, repo, name, target string) error {

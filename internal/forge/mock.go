@@ -45,6 +45,7 @@ type MockForge struct {
 	OpenDependenciesFn  func(ctx context.Context, owner, name string, number int64) ([]Dependency, error)
 	ApplyLabelsFn       func(ctx context.Context, owner, name string, number int64, add, remove []string) error
 	DeleteLabelFn       func(ctx context.Context, owner, name, label string) error
+	CanPushFn           func(ctx context.Context, owner, name, branch string) (bool, error)
 }
 
 var (
@@ -52,7 +53,17 @@ var (
 	_ StackResolver      = (*MockForge)(nil)
 	_ DependencyResolver = (*MockForge)(nil)
 	_ Labeler            = (*MockForge)(nil)
+	_ PushChecker        = (*MockForge)(nil)
 )
+
+// CanPush defaults to true: gitea-mq may push unless a test says otherwise.
+func (m *MockForge) CanPush(ctx context.Context, owner, name, branch string) (bool, error) {
+	m.record("CanPush", owner, name, branch)
+	if m.CanPushFn != nil {
+		return m.CanPushFn(ctx, owner, name, branch)
+	}
+	return true, nil
+}
 
 func (m *MockForge) RemoveLabel(ctx context.Context, owner, name string, number int64, label string) error {
 	m.record("RemoveLabel", owner, name, number, label)

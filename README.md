@@ -97,7 +97,10 @@ Trade-offs and prerequisites:
     creates; no extra setup.
   - **Gitea**: add the API token's user to the branch protection's *push
     whitelist*. If you forget, every PR in the batch is removed with a comment
-    naming the branch and the user to add.
+    naming the branch and the user to add. A branch you deliberately keep
+    closed to pushes (e.g. a release branch merged into from `main`) still
+    takes PRs that already contain its tip: gitea-mq marks them green and the
+    forge's auto-merge merges them, as with `BATCH_MAX=1`.
 - Batched PRs land as **merge commits** regardless of the repo's configured
   merge style. A single PR that already contains the target tip is landed
   by fast-forwarding to its head (no merge commit, no extra CI run). Repos that mandate squash/rebase should leave `BATCH_MAX=1`.

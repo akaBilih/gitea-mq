@@ -79,6 +79,9 @@ func MQStatus(state, description, targetURL string) CommitStatus {
 // Only the fields we need are included.
 type Branch struct {
 	Name string `json:"name"`
+	// UserCanPush is whether the token's user may push to the branch, branch
+	// protection included. Only GetBranch fills it.
+	UserCanPush bool `json:"user_can_push"`
 }
 
 // BranchProtection holds the relevant fields from a branch protection rule.
@@ -228,6 +231,11 @@ type Client interface {
 	// Handles pagination internally.
 	// GET /repos/{owner}/{repo}/branches
 	ListBranches(ctx context.Context, owner, repo string) ([]Branch, error)
+
+	// GetBranch returns a single branch, including the token user's push
+	// permission on it.
+	// GET /repos/{owner}/{repo}/branches/{branch}
+	GetBranch(ctx context.Context, owner, repo, branch string) (*Branch, error)
 
 	// CreateBranch creates a new branch from a target ref.
 	// POST /repos/{owner}/{repo}/branches

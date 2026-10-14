@@ -64,3 +64,27 @@ func TestOpenDependencies_UnsupportedForge(t *testing.T) {
 		t.Fatalf("want nil, nil; got %v, %v", deps, err)
 	}
 }
+
+func TestForge_CanPush_ReadsGiteaVerdict(t *testing.T) {
+	ctx := context.Background()
+	mock := &gitea.MockClient{
+		GetBranchFn: func(_ context.Context, _, _, branch string) (*gitea.Branch, error) {
+			return &gitea.Branch{Name: branch, UserCanPush: branch == "develop"}, nil
+		},
+	}
+	f := gitea.NewForge(mock, "https://gitea.example.com")
+
+	for branch, want := range map[string]bool{"develop": true, "master": false} {
+		got, err := forge.CanPush(ctx, f, "org", "app", branch)
+		if err != nil || got != want {
+			t.Errorf("CanPush(%s) = %v, %v; want %v", branch, got, err, want)
+		}
+	}
+
+	mock.GetBranchFn = func(context.Context, string, string, string) (*gitea.Branch, error) {
+		return nil, errors.New("502 Bad Gateway")
+	}
+	if _, err := forge.CanPush(ctx, f, "org", "app", "master"); err == nil {
+		t.Error("CanPush must report a failed lookup")
+	}
+}

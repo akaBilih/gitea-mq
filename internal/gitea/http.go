@@ -356,6 +356,25 @@ func (c *HTTPClient) GetBranchProtection(ctx context.Context, owner, repo, branc
 	return &bp, nil
 }
 
+// GetBranch returns a single branch, including the token user's push
+// permission on it.
+// GET /repos/{owner}/{repo}/branches/{branch}
+func (c *HTTPClient) GetBranch(ctx context.Context, owner, repo, branch string) (*Branch, error) {
+	path := fmt.Sprintf("/repos/%s/%s/branches/%s", owner, repo, branch)
+
+	resp, err := c.do(ctx, http.MethodGet, path, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var b Branch
+	if err := c.decodeJSON(resp, &b); err != nil {
+		return nil, fmt.Errorf("get branch %s in %s/%s: %w", branch, owner, repo, err)
+	}
+
+	return &b, nil
+}
+
 // ListBranches returns all branches for a repository. Handles pagination.
 func (c *HTTPClient) ListBranches(ctx context.Context, owner, repo string) ([]Branch, error) {
 	return paginate[Branch](ctx, c,

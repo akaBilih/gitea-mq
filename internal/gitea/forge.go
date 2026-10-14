@@ -38,6 +38,7 @@ var (
 	_ forge.Forge              = (*giteaForge)(nil)
 	_ forge.MergeStacker       = (*giteaForge)(nil)
 	_ forge.DependencyResolver = (*giteaForge)(nil)
+	_ forge.PushChecker        = (*giteaForge)(nil)
 )
 
 // StackMerges builds the batch branch in one clone instead of one per member.
@@ -262,6 +263,16 @@ func (f *giteaForge) IsUpToDate(ctx context.Context, owner, name, base, headSHA 
 		return false, err
 	}
 	return cmp.TotalCommits == 0, nil
+}
+
+// CanPush reads Gitea's own verdict for the token's user, which accounts for
+// branch protection (push disabled, push whitelist).
+func (f *giteaForge) CanPush(ctx context.Context, owner, name, branch string) (bool, error) {
+	b, err := f.client.GetBranch(ctx, owner, name, branch)
+	if err != nil {
+		return false, err
+	}
+	return b.UserCanPush, nil
 }
 
 func (f *giteaForge) DeleteBranch(ctx context.Context, owner, name, branch string) error {

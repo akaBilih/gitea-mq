@@ -704,6 +704,10 @@ func startQueuedHeads(ctx context.Context, deps *Deps, result *PollResult) {
 		}
 		seenBranches[entry.TargetBranch] = true
 
+		if deps.Batch.Enabled() && handBackUpToDateHead(ctx, deps, result, entry.TargetBranch) {
+			continue
+		}
+
 		// A held batch is reviewed on every poll, and its members sit at the
 		// head while ready PRs queue behind them: let the engine decide.
 		if deps.Batch.TestsWhileBlocked() {
@@ -722,15 +726,9 @@ func startQueuedHeads(ctx context.Context, deps *Deps, result *PollResult) {
 			continue
 		}
 
-		// The batch engine handles up-to-date heads itself (SkipIfUpToDate) by
-		// fast-forwarding the target. On a branch gitea-mq may not push to it
-		// would only be refused, so the forge merges the PR instead, as before
-		// the engine landed them.
+		// The batch engine handles up-to-date heads itself (SkipIfUpToDate),
+		// except on branches handBackUpToDateHead gave to the forge.
 		if deps.Batch.Enabled() {
-			if deps.SkipQueueIfUpToDate && !canPushTarget(ctx, deps, result, entry.TargetBranch) &&
-				tryFastForwardSuccess(ctx, deps, result, head) {
-				continue
-			}
 			if _, err := deps.Batch.FormAndBuild(ctx, entry.TargetBranch); err != nil {
 				result.Errors = append(result.Errors, fmt.Errorf("form batch for %s: %w", entry.TargetBranch, err))
 			}
@@ -754,6 +752,26 @@ func startQueuedHeads(ctx context.Context, deps *Deps, result *PollResult) {
 			slog.Info("started testing for head-of-queue", "pr", head.PrNumber, "branch", startResult.MergeBranchName)
 		}
 	}
+}
+
+// handBackUpToDateHead gives the forge an up-to-date queue head on a branch
+// gitea-mq may not push to. The batch engine would land it by fast-forwarding
+// the target, which such a branch refuses; marked green, the forge's own merge
+// takes it, as before the engine landed up-to-date heads. Runs ahead of the
+// engine in both batch modes. A head waiting on a dependency is left alone:
+// the forge would refuse to merge it.
+func handBackUpToDateHead(ctx context.Context, deps *Deps, result *PollResult, branch string) bool {
+	if !deps.SkipQueueIfUpToDate {
+		return false
+	}
+	head, err := deps.Queue.Head(ctx, deps.RepoID, branch)
+	if err != nil || head == nil || head.State != pg.EntryStateQueued || head.Waiting {
+		return false
+	}
+	if canPushTarget(ctx, deps, result, branch) {
+		return false
+	}
+	return tryFastForwardSuccess(ctx, deps, result, head)
 }
 
 // canPushTarget reports whether gitea-mq may push to branch. A failed lookup

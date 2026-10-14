@@ -76,6 +76,22 @@ type Deps struct {
 	hintedSHAs map[string]bool
 	// blockedStatus: head SHA -> last "blocked" description posted.
 	blockedStatus map[string]string
+	// guard answers which dependencies can move a branch; fresh per poll.
+	guard *forge.BranchGuard
+}
+
+// testableWhileBlocked reports whether a PR with open dependencies may still
+// be queued to be tested early: none of them can move the branch it lands on
+// or its own head, so the tested merge still holds once they close.
+func (d *Deps) testableWhileBlocked(ctx context.Context, deps []forge.Dependency, branches ...string) (bool, error) {
+	if !d.Batch.TestsWhileBlocked() {
+		return false, nil
+	}
+	if d.guard == nil {
+		d.guard = forge.NewBranchGuard(d.Forge, d.Owner, d.Repo)
+	}
+	moves, err := d.guard.CanMove(ctx, deps, branches...)
+	return err == nil && !moves, err
 }
 
 func (d *Deps) now() time.Time {
@@ -165,6 +181,7 @@ func prCheckResult(ctx context.Context, deps *Deps, pr *forge.PR, targetBranch s
 // PollOnce runs a single reconcile cycle for one repository.
 func PollOnce(ctx context.Context, deps *Deps) (*PollResult, error) {
 	result := &PollResult{}
+	deps.guard = nil // a dependency may have been retargeted since the last poll
 
 	openPRs, err := deps.Forge.ListOpenPRs(ctx, deps.Owner, deps.Repo)
 	if err != nil {
@@ -329,12 +346,22 @@ func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR
 		result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", pr.Number, err))
 		return
 	}
+	enqueue := deps.Queue.Enqueue
 	if len(blockers) > 0 {
-		markBlocked(ctx, deps, pr.Number, pr.HeadSHA, blockers)
-		return
+		testable, err := deps.testableWhileBlocked(ctx, blockers, targetBranch, pr.HeadBranch)
+		if err != nil {
+			result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", pr.Number, err))
+			return
+		}
+		if !testable {
+			markBlocked(ctx, deps, pr.Number, pr.HeadSHA, blockers)
+			return
+		}
+		// It may not land yet, but it can be tested meanwhile.
+		enqueue = deps.Queue.EnqueueWaiting
 	}
 
-	enqResult, err := deps.Queue.Enqueue(ctx, deps.RepoID, pr.Number, pr.HeadSHA, targetBranch, deps.isPriority(pr))
+	enqResult, err := enqueue(ctx, deps.RepoID, pr.Number, pr.HeadSHA, targetBranch, deps.isPriority(pr))
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("enqueue PR #%d: %w", pr.Number, err))
 		return
@@ -343,6 +370,10 @@ func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR
 	if enqResult.IsNew {
 		delete(deps.blockedStatus, pr.HeadSHA)
 		desc := fmt.Sprintf("Queued (position #%d)", enqResult.Position)
+		if len(blockers) > 0 {
+			desc = forge.WaitingStatus(blockers, deps.Owner, deps.Repo)
+			deps.rememberStatus(pr.HeadSHA, desc)
+		}
 		targetURL := forge.DashboardPRURL(deps.ExternalURL, deps.Forge.Kind(), deps.Owner, deps.Repo, pr.Number)
 		if err := deps.Forge.SetMQStatus(ctx, deps.Owner, deps.Repo, pr.HeadSHA, forge.MQStatus{
 			State: pg.CheckStatePending, Description: desc, TargetURL: targetURL,
@@ -569,7 +600,7 @@ func reconcileEntries(ctx context.Context, deps *Deps, result *PollResult, openP
 			}
 			continue
 		}
-		if isOpen && holdIfBlocked(ctx, deps, result, &entry) {
+		if isOpen && holdIfBlocked(ctx, deps, result, &entry, pr) {
 			continue
 		}
 		if prio := deps.isPriority(pr); entry.State == pg.EntryStateQueued && entry.Priority != prio {
@@ -682,6 +713,15 @@ func startQueuedHeads(ctx context.Context, deps *Deps, result *PollResult) {
 			continue
 		}
 		seenBranches[entry.TargetBranch] = true
+
+		// A held batch is reviewed on every poll, and its members sit at the
+		// head while ready PRs queue behind them: let the engine decide.
+		if deps.Batch.TestsWhileBlocked() {
+			if _, err := deps.Batch.FormAndBuild(ctx, entry.TargetBranch); err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("form batch for %s: %w", entry.TargetBranch, err))
+			}
+			continue
+		}
 
 		head, err := deps.Queue.Head(ctx, deps.RepoID, entry.TargetBranch)
 		if err != nil {
@@ -856,7 +896,12 @@ func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) 
 
 // markBlocked posts the blocked status once per head SHA and description.
 func markBlocked(ctx context.Context, deps *Deps, number int64, sha string, blockers []forge.Dependency) {
-	desc := forge.BlockedStatus(blockers, deps.Owner, deps.Repo)
+	markStatus(ctx, deps, number, sha, forge.BlockedStatus(blockers, deps.Owner, deps.Repo))
+}
+
+// markStatus posts a pending status about dependencies once per head SHA and
+// description.
+func markStatus(ctx context.Context, deps *Deps, number int64, sha, desc string) {
 	if deps.blockedStatus[sha] == desc {
 		return
 	}
@@ -867,21 +912,51 @@ func markBlocked(ctx context.Context, deps *Deps, number int64, sha string, bloc
 		slog.Warn("set blocked status failed", "pr", number, "error", err)
 		return
 	}
-	if deps.blockedStatus == nil {
-		deps.blockedStatus = make(map[string]string)
+	deps.rememberStatus(sha, desc)
+}
+
+func (d *Deps) rememberStatus(sha, desc string) {
+	if d.blockedStatus == nil {
+		d.blockedStatus = make(map[string]string)
 	}
-	deps.blockedStatus[sha] = desc
+	d.blockedStatus[sha] = desc
 }
 
 // holdIfBlocked dequeues an entry whose PR gained an open dependency, keeping
-// its merge intent so enqueuePR re-adds it once the dependency closes.
-func holdIfBlocked(ctx context.Context, deps *Deps, result *PollResult, entry *pg.QueueEntry) bool {
+// its merge intent so enqueuePR re-adds it once the dependency closes. When the
+// dependency cannot move the target and blocked PRs are tested meanwhile, the
+// entry stays, marked waiting until it may land. Reports whether it left.
+func holdIfBlocked(ctx context.Context, deps *Deps, result *PollResult, entry *pg.QueueEntry, pr *forge.PR) bool {
 	blockers, err := forge.OpenDependencies(ctx, deps.Forge, deps.Owner, deps.Repo, entry.PrNumber)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", entry.PrNumber, err))
 		return false
 	}
 	if len(blockers) == 0 {
+		if entry.Waiting {
+			releaseWaiting(ctx, deps, result, entry)
+		}
+		return false
+	}
+
+	testable, err := deps.testableWhileBlocked(ctx, blockers, entry.TargetBranch, pr.HeadBranch)
+	if err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", entry.PrNumber, err))
+		return false
+	}
+	if testable {
+		if !entry.Waiting {
+			if err := deps.Queue.SetWaiting(ctx, entry.ID, true); err != nil {
+				result.Errors = append(result.Errors, fmt.Errorf("mark PR #%d waiting: %w", entry.PrNumber, err))
+				return false
+			}
+			slog.Info("queued PR blocked by an open dependency; tested meanwhile", "pr", entry.PrNumber,
+				"dependencies", forge.DependencyRefs(blockers, deps.Owner, deps.Repo))
+		}
+		// A batch reports on its own members.
+		if !entry.ActiveBatchID.Valid {
+			markStatus(ctx, deps, entry.PrNumber, entry.PrHeadSha, forge.WaitingStatus(blockers, deps.Owner, deps.Repo))
+		}
 		return false
 	}
 
@@ -903,4 +978,27 @@ func holdIfBlocked(ctx context.Context, deps *Deps, result *PollResult, entry *p
 		}
 	}
 	return true
+}
+
+// releaseWaiting clears the waiting mark of an entry whose dependencies all
+// closed: it may land now. This also runs with testing blocked PRs switched
+// off, so marks left from before are not stranded.
+func releaseWaiting(ctx context.Context, deps *Deps, result *PollResult, entry *pg.QueueEntry) {
+	if err := deps.Queue.SetWaiting(ctx, entry.ID, false); err != nil {
+		result.Errors = append(result.Errors, fmt.Errorf("clear waiting mark of PR #%d: %w", entry.PrNumber, err))
+		return
+	}
+	slog.Info("dependencies of queued PR closed", "pr", entry.PrNumber)
+	delete(deps.blockedStatus, entry.PrHeadSha)
+	if entry.ActiveBatchID.Valid {
+		return // the batch reports on its own members
+	}
+	pos, err := deps.Queue.Position(ctx, deps.RepoID, entry.TargetBranch, entry.PrNumber)
+	if err != nil {
+		return
+	}
+	logutil.WarnIfErr(deps.Forge.SetMQStatus(ctx, deps.Owner, deps.Repo, entry.PrHeadSha, forge.MQStatus{
+		State: pg.CheckStatePending, Description: fmt.Sprintf("Queued (position #%d)", pos),
+		TargetURL: forge.DashboardPRURL(deps.ExternalURL, deps.Forge.Kind(), deps.Owner, deps.Repo, entry.PrNumber),
+	}), "set mq status failed", "pr", entry.PrNumber)
 }

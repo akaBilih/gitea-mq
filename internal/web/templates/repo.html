@@ -20,7 +20,7 @@
     <div class="section batch-header">
         📦 Batch #{{.ID}} ·
         {{if .BranchURL}}<a href="{{.BranchURL}}">{{.BranchName}}</a>{{else}}{{.BranchName}}{{end}}
-        · build {{.Builds}} · testing {{.Current}}/{{.Members}} → {{.TargetBranch}}
+        · build {{.Builds}} · {{if .Held}}passed, held for dependencies {{else}}testing {{end}}{{.Current}}/{{.Members}} → {{.TargetBranch}}
     </div>
     {{end}}
 
@@ -41,7 +41,7 @@
                     <td>{{inc $i}}</td>
                     <td><a href="{{$.BasePath}}/repo/{{$.Forge}}/{{$.Owner}}/{{$.Name}}/pr/{{$e.PrNumber}}">PR #{{$e.PrNumber}}</a></td>
                     <td>{{$e.TargetBranch}}</td>
-                    <td><span class="state state-{{$e.State}}">{{$e.State}}</span>{{if $e.BatchBucket}} <span class="bucket bucket-{{$e.BatchBucket}}">{{$e.BatchBucket}}</span>{{end}}{{if $e.Priority}} <span class="bucket bucket-priority">priority</span>{{end}}</td>
+                    <td><span class="state state-{{$e.State}}">{{$e.State}}</span>{{if $e.BatchBucket}} <span class="bucket bucket-{{$e.BatchBucket}}">{{$e.BatchBucket}}</span>{{end}}{{if $e.Priority}} <span class="bucket bucket-priority">priority</span>{{end}}{{if $e.Waiting}} <span class="bucket bucket-waiting">blocked</span>{{end}}</td>
                 </tr>
                 {{end}}
             </tbody>

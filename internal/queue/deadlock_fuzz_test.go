@@ -116,7 +116,7 @@ func TestDeadlockFuzz(t *testing.T) {
 			if b, err := svc.GetLiveBatch(ctx, id, br); err != nil || b != nil {
 				return err
 			}
-			_, err := svc.FormBatch(ctx, id, br, r.IntN(4))
+			_, err := svc.FormBatch(ctx, id, br, r.IntN(4), false)
 			return err
 		}},
 		{"SaveBatch", func(ctx context.Context, r *rand.Rand) error {

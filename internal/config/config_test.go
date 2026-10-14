@@ -141,6 +141,29 @@ func TestLoad_LabelCollisions(t *testing.T) {
 	}
 }
 
+// Testing blocked PRs is off by default and needs batching: only a batch lands
+// by fast-forward, the forge's merge would refuse the PR again.
+func TestLoad_TestWhileBlocked(t *testing.T) {
+	setEnv(t, giteaEnv)
+	cfg, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.TestWhileBlocked {
+		t.Fatal("TestWhileBlocked on by default")
+	}
+
+	t.Setenv("GITEA_MQ_TEST_WHILE_BLOCKED", "true")
+	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "GITEA_MQ_BATCH_MAX") {
+		t.Fatalf("want an error naming GITEA_MQ_BATCH_MAX without batching, got %v", err)
+	}
+
+	t.Setenv("GITEA_MQ_BATCH_MAX", "0")
+	if cfg, err = Load(); err != nil || !cfg.TestWhileBlocked {
+		t.Fatalf("want TestWhileBlocked with batching, got %v, %v", cfg, err)
+	}
+}
+
 func TestLoad_NoForgeFails(t *testing.T) {
 	setEnv(t, baseEnv)
 	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "no forge configured") {

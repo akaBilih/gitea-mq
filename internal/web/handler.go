@@ -115,6 +115,7 @@ type RepoDetailEntry struct {
 	State        string
 	BatchBucket  string // current/pending/landed when in a live batch
 	Priority     bool
+	Waiting      bool // blocked by open dependencies, tested meanwhile
 }
 
 // RepoDetailBatch surfaces a live batch on the repo detail page.
@@ -126,6 +127,7 @@ type RepoDetailBatch struct {
 	Builds       int32
 	Current      int
 	Members      int
+	Held         bool // passed, waiting for its members' dependencies
 }
 
 // RepoDetailData is the template data for the repo detail page.
@@ -342,6 +344,7 @@ func serveRepoDetail(w http.ResponseWriter, r *http.Request, deps *Deps, ref for
 			Builds:       b.Builds,
 			Current:      len(b.CurrentIds),
 			Members:      len(b.MemberIds),
+			Held:         b.State == pg.BatchStateHeld,
 		}
 		if f != nil && rb.BranchName != "" {
 			rb.BranchURL = f.BranchHTMLURL(owner, name, rb.BranchName)
@@ -355,6 +358,7 @@ func serveRepoDetail(w http.ResponseWriter, r *http.Request, deps *Deps, ref for
 			TargetBranch: e.TargetBranch,
 			State:        string(e.State),
 			Priority:     e.Priority,
+			Waiting:      e.Waiting,
 		}
 		if e.ActiveBatchID.Valid {
 			if b := byID[e.ActiveBatchID.Int64]; b != nil {

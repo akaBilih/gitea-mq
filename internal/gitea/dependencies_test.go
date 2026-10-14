@@ -2,6 +2,7 @@ package gitea_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 
@@ -25,6 +26,30 @@ func TestForge_OpenDependencies_KeepsOnlyOpenOnes(t *testing.T) {
 	}
 	if got := forge.DependencyRefs(deps, "org", "app"); got != "#7, org/lib#3" {
 		t.Fatalf("open dependencies: got %q", got)
+	}
+}
+
+// Gitea sends "pull_request": null for an issue and an object for a PR; only
+// a PR can move a branch when it closes.
+func TestForge_OpenDependencies_TellsPullRequestsFromIssues(t *testing.T) {
+	var issues []gitea.Issue
+	if err := json.Unmarshal([]byte(`[
+		{"number": 5, "state": "open", "pull_request": null},
+		{"number": 6, "state": "open", "pull_request": {"merged": false, "draft": false}}
+	]`), &issues); err != nil {
+		t.Fatal(err)
+	}
+	mock := &gitea.MockClient{
+		ListIssueDependenciesFn: func(context.Context, string, string, int64) ([]gitea.Issue, error) {
+			return issues, nil
+		},
+	}
+	deps, err := forge.OpenDependencies(context.Background(), newForge(mock), "org", "app", 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(deps) != 2 || deps[0].PR || !deps[1].PR {
+		t.Fatalf("want #5 an issue and #6 a PR, got %+v", deps)
 	}
 }
 

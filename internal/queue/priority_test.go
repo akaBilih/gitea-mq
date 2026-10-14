@@ -78,7 +78,7 @@ func TestFormBatchPriorityOnly(t *testing.T) {
 	enqueue(t, svc, repoID, false, 10, 20)
 	enqueue(t, svc, repoID, true, 30, 40)
 
-	b, err := svc.FormBatch(ctx, repoID, "main", 0)
+	b, err := svc.FormBatch(ctx, repoID, "main", 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}

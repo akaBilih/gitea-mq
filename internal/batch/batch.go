@@ -53,6 +53,12 @@ type Engine struct {
 	// SkipIfUpToDate lands a single up-to-date PR by fast-forwarding to its
 	// head instead of building a batch branch.
 	SkipIfUpToDate bool
+	// TestWhileBlocked tests the entries the poller queued as waiting (open
+	// dependencies that cannot move the target) in batches of their own,
+	// whenever nothing that may land is queued. A batch that passes while its
+	// members are still blocked is held, and lands by fast-forward once they
+	// close, without another CI run.
+	TestWhileBlocked bool
 
 	// MergedPoll controls ensureMergedOrClose. Defaults: 200ms × 50 = 10s.
 	MergedPollInterval time.Duration
@@ -129,20 +135,35 @@ func (e *Engine) FormAndBuild(ctx context.Context, targetBranch string) (*pg.Bat
 		return nil, err
 	}
 	if live != nil {
-		// A forming batch means a previous Build errored mid-run; retry it
-		// so a transient forge failure does not stall the queue until restart.
-		if live.State == pg.BatchStateForming {
+		switch {
+		case live.State == pg.BatchStateForming:
+			// A previous Build errored mid-run; retry it so a transient forge
+			// failure does not stall the queue until restart.
 			return live, e.Build(ctx, live)
+		case live.State == pg.BatchStateHeld,
+			live.State == pg.BatchStateTesting && e.TestsWhileBlocked():
+			if dissolved, err := e.review(ctx, live); err != nil || !dissolved {
+				return nil, err
+			}
+		default:
+			return nil, nil
 		}
-		return nil, nil
 	}
-	b, err := e.Queue.FormBatch(ctx, e.RepoID, targetBranch, e.BatchMax)
+	b, err := e.Queue.FormBatch(ctx, e.RepoID, targetBranch, e.BatchMax, false)
+	if err == nil && b == nil && e.TestsWhileBlocked() {
+		// Nothing may land: test what is waiting on its dependencies.
+		b, err = e.Queue.FormBatch(ctx, e.RepoID, targetBranch, e.BatchMax, true)
+	}
 	if err != nil || b == nil {
 		return nil, err
 	}
 	slog.Info("batch formed", "batch", b.ID, "branch", targetBranch, "members", len(b.MemberIds))
 	return b, e.Build(ctx, b)
 }
+
+// TestsWhileBlocked reports whether PRs blocked by dependencies that cannot
+// move the target branch are tested before they may land.
+func (e *Engine) TestsWhileBlocked() bool { return e.Enabled() && e.TestWhileBlocked }
 
 // Build constructs the batch branch by merging current_ids onto the target
 // tip. Conflicting members are ejected and construction continues. On success
@@ -272,20 +293,19 @@ func (e *Engine) HandlePass(ctx context.Context, b *pg.Batch) error {
 	if b.State != pg.BatchStateTesting {
 		return nil
 	}
+	return e.land(ctx, b)
+}
+
+// land fast-forwards the target to the tested SHA of a testing or held batch,
+// unless open dependencies keep members back.
+func (e *Engine) land(ctx context.Context, b *pg.Batch) error {
 	entries, err := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
 	if err != nil {
 		return err
 	}
 	// The fast-forward below skips the forge's dependency check.
-	held, err := e.holdBlocked(ctx, b, entries)
-	if err != nil {
+	if handled, err := e.holdBlocked(ctx, b, entries); err != nil || handled {
 		return err
-	}
-	if held {
-		if len(b.CurrentIds) == 0 {
-			return e.next(ctx, b)
-		}
-		return e.rebuild(ctx, b)
 	}
 	statusHeads, err := e.landedStatusHeads(ctx, entries)
 	if err != nil {
@@ -415,7 +435,7 @@ func (e *Engine) OnMemberRemoved(ctx context.Context, targetBranch string, batch
 	if err != nil || b == nil {
 		return err
 	}
-	if b.State != pg.BatchStateForming && b.State != pg.BatchStateTesting {
+	if b.State != pg.BatchStateForming && b.State != pg.BatchStateTesting && b.State != pg.BatchStateHeld {
 		return nil
 	}
 	id := entryID
@@ -457,7 +477,8 @@ func (e *Engine) LiveBranchNames(ctx context.Context) ([]string, error) {
 // ReconcileLive resumes batches found at startup: forming → rebuild;
 // testing → re-sync each current entry's merge_branch_* from the batch row
 // so a crash between Build's SaveBatch and SetMergeBranch cannot strand the
-// batch with no entry routing the current SHA.
+// batch with no entry routing the current SHA; held while testing blocked PRs
+// is switched off → dissolved, since nothing would ever review it.
 func (e *Engine) ReconcileLive(ctx context.Context) error {
 	bs, err := e.Queue.ListLiveBatches(ctx, e.RepoID)
 	if err != nil {
@@ -477,6 +498,11 @@ func (e *Engine) ReconcileLive(ctx context.Context) error {
 			for _, ent := range entries {
 				logutil.WarnIfErr(e.Queue.SetMergeBranch(ctx, e.RepoID, ent.PrNumber,
 					b.BranchName.String, b.BranchSha.String), "set merge branch failed", "pr", ent.PrNumber)
+			}
+		case pg.BatchStateHeld:
+			if !e.TestsWhileBlocked() {
+				logutil.WarnIfErr(e.dissolve(ctx, b, "testing blocked PRs is switched off"),
+					"dissolve held batch failed", "batch", b.ID)
 			}
 		}
 		unlock()
@@ -530,10 +556,11 @@ func (e *Engine) stack(ctx context.Context, base string, heads []string, branch 
 
 // rebuild persists the batch as forming (so a crash before Build's own save
 // is picked up by ReconcileLive, and a concurrent HandleCheck drops on the
-// state guard) and then runs Build.
-func (e *Engine) rebuild(ctx context.Context, b *pg.Batch) error {
+// state guard) and then runs Build. requeue goes back to the queue in the same
+// save.
+func (e *Engine) rebuild(ctx context.Context, b *pg.Batch, requeue ...int64) error {
 	b.State = pg.BatchStateForming
-	if err := e.Queue.SaveBatch(ctx, b, b.EjectedIds...); err != nil {
+	if err := e.Queue.SaveBatchRequeuing(ctx, b, requeue, b.EjectedIds...); err != nil {
 		return err
 	}
 	return e.Build(ctx, b)
@@ -573,10 +600,11 @@ func (e *Engine) finish(ctx context.Context, b *pg.Batch, build bool) error {
 	return nil
 }
 
-// next pops the pending stack and rebuilds, or finishes the batch.
-func (e *Engine) next(ctx context.Context, b *pg.Batch) error {
+// next pops the pending stack and rebuilds, or finishes the batch. requeue
+// goes back to the queue in the same save.
+func (e *Engine) next(ctx context.Context, b *pg.Batch, requeue ...int64) error {
 	build := popNext(b)
-	if err := e.Queue.SaveBatch(ctx, b, b.EjectedIds...); err != nil {
+	if err := e.Queue.SaveBatchRequeuing(ctx, b, requeue, b.EjectedIds...); err != nil {
 		return err
 	}
 	return e.finish(ctx, b, build)
@@ -665,9 +693,12 @@ func ids(entries []pg.QueueEntry) []int64 {
 	return out
 }
 
-// holdBlocked drops members with an open dependency but keeps their merge
-// intent; the poller re-enqueues them once it closes. All lookups happen before
-// any change, so a forge error leaves the batch untouched.
+// holdBlocked keeps members with an open dependency from landing. Those the
+// poller queued as waiting go back to the queue; the rest leave it with their
+// merge intent kept, and the poller re-enqueues them once it closes. A batch
+// whose members all wait is held instead or, mid-bisection, handed back so the
+// pending halves still get tested. All lookups happen before any change, so a
+// forge error leaves the batch untouched. Reports whether it took b over.
 func (e *Engine) holdBlocked(ctx context.Context, b *pg.Batch, entries []pg.QueueEntry) (bool, error) {
 	blocked := make(map[int64][]forge.Dependency)
 	for i := range entries {
@@ -683,10 +714,28 @@ func (e *Engine) holdBlocked(ctx context.Context, b *pg.Batch, entries []pg.Queu
 		return false, nil
 	}
 
+	var waiting []int64
+	for i := range entries {
+		if _, ok := blocked[entries[i].ID]; ok && entries[i].Waiting && e.TestsWhileBlocked() {
+			waiting = append(waiting, entries[i].ID)
+		}
+	}
+	if len(waiting) == len(entries) {
+		if len(loadPending(b.Pending)) == 0 {
+			return true, e.hold(ctx, b, entries, blocked)
+		}
+		// Nothing lands to build the pending halves on, so this one goes back
+		// to the queue untouched; a later batch tests it with the others.
+		e.setWaitingStatuses(ctx, entries, blocked)
+		b.CurrentIds = nil
+		slog.Info("batch half passed while blocked; requeued", "batch", b.ID, "requeued", len(waiting))
+		return true, e.next(ctx, b, waiting...)
+	}
+
 	for i := range entries {
 		ent := &entries[i]
 		deps, ok := blocked[ent.ID]
-		if !ok {
+		if !ok || slices.Contains(waiting, ent.ID) {
 			continue
 		}
 		logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
@@ -698,10 +747,127 @@ func (e *Engine) holdBlocked(ctx context.Context, b *pg.Batch, entries []pg.Queu
 		// The next SaveBatch deletes EjectedIds from the queue.
 		b.EjectedIds = append(b.EjectedIds, ent.ID)
 	}
+	e.setWaitingStatuses(ctx, entries, blocked, waiting...)
 	b.CurrentIds = slices.DeleteFunc(b.CurrentIds, func(id int64) bool {
 		_, ok := blocked[id]
 		return ok
 	})
-	slog.Info("batch members held back by open dependencies", "batch", b.ID, "held", len(blocked), "current", len(b.CurrentIds))
-	return true, nil
+	slog.Info("batch members held back by open dependencies", "batch", b.ID, "held", len(blocked),
+		"requeued", len(waiting), "current", len(b.CurrentIds))
+	if len(b.CurrentIds) == 0 {
+		return true, e.next(ctx, b, waiting...)
+	}
+	return true, e.rebuild(ctx, b, waiting...)
+}
+
+// setWaitingStatuses marks blocked entries as queued to be tested meanwhile;
+// with only given, just those.
+func (e *Engine) setWaitingStatuses(ctx context.Context, entries []pg.QueueEntry, blocked map[int64][]forge.Dependency, only ...int64) {
+	for i := range entries {
+		ent := &entries[i]
+		deps, ok := blocked[ent.ID]
+		if !ok || (len(only) > 0 && !slices.Contains(only, ent.ID)) {
+			continue
+		}
+		logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
+			State: pg.CheckStatePending, Description: forge.WaitingStatus(deps, e.Owner, e.Repo), TargetURL: e.prURL(ent.PrNumber),
+		}), "set mq status failed", "pr", ent.PrNumber)
+	}
+}
+
+// hold parks a batch that passed while every member still waits on
+// dependencies that cannot move the target. Its SHA stays good for as long as
+// the target does not move, so review lands it once they close.
+func (e *Engine) hold(ctx context.Context, b *pg.Batch, entries []pg.QueueEntry, blocked map[int64][]forge.Dependency) error {
+	b.State = pg.BatchStateHeld
+	if err := e.Queue.SaveBatch(ctx, b, b.EjectedIds...); err != nil {
+		return err
+	}
+	for i := range entries {
+		ent := &entries[i]
+		logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
+			State: pg.CheckStatePending, Description: forge.HeldStatus(b.ID, blocked[ent.ID], e.Owner, e.Repo), TargetURL: e.prURL(ent.PrNumber),
+		}), "set mq status failed", "pr", ent.PrNumber)
+	}
+	slog.Info("batch passed; held until its dependencies close", "batch", b.ID, "sha", b.BranchSha.String, "members", len(entries))
+	return nil
+}
+
+// review re-decides a held batch, and a testing one made only of waiting
+// entries, against the queue as it is now. Whatever may land goes first, so
+// such a batch never delays a PR that could merge. Reports whether it
+// dissolved b.
+func (e *Engine) review(ctx context.Context, b *pg.Batch) (bool, error) {
+	if b.State == pg.BatchStateHeld && !e.TestsWhileBlocked() {
+		return true, e.dissolve(ctx, b, "testing blocked PRs is switched off")
+	}
+	entries, err := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
+	if err != nil || len(entries) == 0 {
+		return false, err
+	}
+	if slices.ContainsFunc(entries, func(ent pg.QueueEntry) bool { return !ent.Waiting }) {
+		// The poller saw dependencies close. A testing batch runs to its
+		// verdict; a held one lands now, and land sorts out any still blocked.
+		if b.State == pg.BatchStateHeld {
+			return false, e.land(ctx, b)
+		}
+		return false, nil
+	}
+
+	queued, err := e.Queue.ListActiveEntries(ctx, e.RepoID)
+	if err != nil {
+		return false, err
+	}
+	// Only a PR queued after b formed counts: re-forming around the members
+	// b already split off could repeat the same failing combination forever.
+	var newcomers int
+	for _, q := range queued {
+		if q.TargetBranch != b.TargetBranch || q.State != pg.EntryStateQueued {
+			continue
+		}
+		if !q.Waiting {
+			return true, e.dissolve(ctx, b, fmt.Sprintf("PR #%d may land first", q.PrNumber))
+		}
+		if q.EnqueuedAt.Time.After(b.CreatedAt.Time) {
+			newcomers++
+		}
+	}
+	if b.State != pg.BatchStateHeld {
+		return false, nil
+	}
+	if newcomers > 0 && (e.BatchMax <= 0 || len(b.CurrentIds) < e.BatchMax) {
+		return true, e.dissolve(ctx, b, "testing it with newly blocked PRs")
+	}
+	up, err := e.Forge.IsUpToDate(ctx, e.Owner, e.Repo, b.TargetBranch, b.BranchSha.String)
+	if err != nil {
+		return false, fmt.Errorf("check held batch #%d against %s: %w", b.ID, b.TargetBranch, err)
+	}
+	if !up {
+		return true, e.dissolve(ctx, b, b.TargetBranch+" moved")
+	}
+	return false, nil
+}
+
+// dissolve hands every member still in play back to the queue, where each
+// keeps its place, and cancels b; the next FormAndBuild forms a fresh batch.
+func (e *Engine) dissolve(ctx context.Context, b *pg.Batch, reason string) error {
+	back := slices.Clone(b.CurrentIds)
+	for _, s := range loadPending(b.Pending) {
+		back = append(back, s...)
+	}
+	entries, _ := e.Queue.GetEntriesByIDs(ctx, back)
+	b.CurrentIds, b.Pending = nil, nil
+	b.State = pg.BatchStateCancelled
+	if err := e.Queue.SaveBatchRequeuing(ctx, b, back, b.EjectedIds...); err != nil {
+		return err
+	}
+	logutil.WarnIfErr(e.Forge.DeleteBranch(ctx, e.Owner, e.Repo, b.BranchName.String), "delete batch branch failed", "branch", b.BranchName.String)
+	for i := range entries {
+		ent := &entries[i]
+		logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
+			State: pg.CheckStatePending, Description: "Back in the queue: " + reason, TargetURL: e.prURL(ent.PrNumber),
+		}), "set mq status failed", "pr", ent.PrNumber)
+	}
+	slog.Info("batch dissolved", "batch", b.ID, "reason", reason, "requeued", len(back))
+	return nil
 }

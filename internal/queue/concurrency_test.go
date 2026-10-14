@@ -77,7 +77,7 @@ func TestConcurrentFormBatchOnSeparateBranches(t *testing.T) {
 					return
 				}
 			}
-			b, err := svc.FormBatch(ctx, repo.ID, branch, 0)
+			b, err := svc.FormBatch(ctx, repo.ID, branch, 0, false)
 			if err == nil && len(b.MemberIds) != perBranch {
 				err = fmt.Errorf("batch for %s has %d members, want %d", branch, len(b.MemberIds), perBranch)
 			}
@@ -99,7 +99,7 @@ func TestSaveBatchDoesNotReviveCancelled(t *testing.T) {
 	if _, err := svc.Enqueue(ctx, repoID, 1, "sha", "main", false); err != nil {
 		t.Fatal(err)
 	}
-	b, err := svc.FormBatch(ctx, repoID, "main", 0)
+	b, err := svc.FormBatch(ctx, repoID, "main", 0, false)
 	if err != nil {
 		t.Fatal(err)
 	}

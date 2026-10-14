@@ -183,6 +183,16 @@ in
       description = "Cap on CI builds spent bisecting one failing batch. 0 means unlimited.";
     };
 
+    testWhileBlocked = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Test PRs blocked by issue dependencies that cannot move their target
+        branch while they wait, and land them without another CI run once the
+        dependencies close. Requires batching (batchMax other than 1).
+      '';
+    };
+
     refreshInterval = lib.mkOption {
       type = lib.types.str;
       default = "10s";
@@ -295,6 +305,7 @@ in
         GITEA_MQ_SKIP_QUEUE_IF_UP_TO_DATE = lib.boolToString cfg.skipQueueIfUpToDate;
         GITEA_MQ_BATCH_MAX = toString cfg.batchMax;
         GITEA_MQ_BISECT_MAX_STEPS = toString cfg.bisectMaxSteps;
+        GITEA_MQ_TEST_WHILE_BLOCKED = lib.boolToString cfg.testWhileBlocked;
         GITEA_MQ_REFRESH_INTERVAL = cfg.refreshInterval;
         GITEA_MQ_DISCOVERY_INTERVAL = cfg.discoveryInterval;
         GITEA_MQ_LOG_LEVEL = cfg.logLevel;

@@ -5,10 +5,26 @@ ON CONFLICT (forge, owner, name) DO UPDATE SET owner = EXCLUDED.owner
 RETURNING *;
 
 -- name: EnqueuePR :one
-INSERT INTO queue_entries (repo_id, pr_number, pr_head_sha, target_branch, priority)
-VALUES ($1, $2, $3, $4, $5)
+INSERT INTO queue_entries (repo_id, pr_number, pr_head_sha, target_branch, priority, waiting)
+VALUES ($1, $2, $3, $4, $5, $6)
 ON CONFLICT (repo_id, pr_number) DO NOTHING
 RETURNING *;
+
+-- name: SetEntryWaiting :exec
+UPDATE queue_entries SET waiting = @waiting
+WHERE id = @id;
+
+-- name: RequeueEntries :exec
+UPDATE queue_entries
+SET state = 'queued', active_batch_id = NULL,
+    merge_branch_name = NULL, merge_branch_sha = NULL
+WHERE id = ANY(@ids::bigint[]);
+
+-- name: CountQueued :one
+SELECT COUNT(*) FILTER (WHERE NOT waiting) AS ready,
+       COUNT(*) FILTER (WHERE waiting)     AS waiting
+FROM queue_entries
+WHERE repo_id = $1 AND target_branch = $2 AND state = 'queued';
 
 -- name: DequeuePR :exec
 DELETE FROM queue_entries
@@ -79,13 +95,14 @@ WHERE id IN (SELECT l.id FROM queue_entries l WHERE l.repo_id = $1 ORDER BY l.id
 
 -- name: TakeQueuedHead :many
 SELECT q.* FROM queue_entries q
-WHERE q.repo_id = $1 AND q.target_branch = $2 AND q.state = 'queued'
+WHERE q.repo_id = $1 AND q.target_branch = $2 AND q.state = 'queued' AND q.waiting = $3
   -- Priority batches exclude normal PRs so one cannot delay the other via bisection.
+  -- Waiting PRs never land, so only the same kind counts.
   AND (q.priority OR NOT EXISTS (
     SELECT 1 FROM queue_entries p
-    WHERE p.repo_id = $1 AND p.target_branch = $2 AND p.state = 'queued' AND p.priority))
+    WHERE p.repo_id = $1 AND p.target_branch = $2 AND p.state = 'queued' AND p.waiting = $3 AND p.priority))
 ORDER BY q.id
-LIMIT $3
+LIMIT $4
 FOR NO KEY UPDATE OF q;
 
 -- name: GetEntriesByIDs :many
@@ -121,11 +138,11 @@ SELECT * FROM batches WHERE id = $1;
 
 -- name: GetLiveBatch :one
 SELECT * FROM batches
-WHERE repo_id = $1 AND target_branch = $2 AND state IN ('forming', 'testing');
+WHERE repo_id = $1 AND target_branch = $2 AND state IN ('forming', 'testing', 'held');
 
 -- name: ListLiveBatchesByRepo :many
 SELECT * FROM batches
-WHERE repo_id = $1 AND state IN ('forming', 'testing');
+WHERE repo_id = $1 AND state IN ('forming', 'testing', 'held');
 
 -- name: SaveBatch :one
 UPDATE batches SET
@@ -140,9 +157,9 @@ UPDATE batches SET
     ff_retries = $10,
     flaky = $11,
     testing_started_at = $12
-WHERE id = $1 AND state IN ('forming', 'testing')
+WHERE id = $1 AND state IN ('forming', 'testing', 'held')
 RETURNING *;
 
 -- name: CancelBatchesByRepo :exec
 UPDATE batches SET state = 'cancelled'
-WHERE id IN (SELECT l.id FROM batches l WHERE l.repo_id = $1 AND l.state IN ('forming', 'testing') ORDER BY l.id FOR UPDATE);
+WHERE id IN (SELECT l.id FROM batches l WHERE l.repo_id = $1 AND l.state IN ('forming', 'testing', 'held') ORDER BY l.id FOR UPDATE);

@@ -15,8 +15,12 @@
     </div>
 
     {{if not .InQueue}}
-    <h1>PR #{{.PrNumber}}</h1>
+    <h1>{{if .PRURL}}<a href="{{.PRURL}}">PR #{{.PrNumber}}</a>{{else}}PR #{{.PrNumber}}{{end}}{{if ne .Title "—"}}: {{.Title}}{{end}}</h1>
+    {{if .Blockers}}
+    <p><span class="state state-queued-blocked">blocked</span> Not in the merge queue: it depends on {{.Blockers}}, still open.</p>
+    {{else}}
     <p class="empty">PR #{{.PrNumber}} is not in the merge queue.</p>
+    {{end}}
     {{else}}
     <h1>{{if .PRURL}}<a href="{{.PRURL}}">PR #{{.PrNumber}}</a>{{else}}PR #{{.PrNumber}}{{end}}: {{.Title}}</h1>
     <div class="section">
@@ -24,6 +28,7 @@
             <tbody>
                 <tr><th>Author</th><td>{{.Author}}</td></tr>
                 <tr><th>State</th><td><span class="state state-{{.State}}">{{.State}}</span></td></tr>
+                {{if .Blockers}}<tr><th>Blocked by</th><td>{{.Blockers}} — tested meanwhile, lands once {{if eq .State "held"}}they close{{else}}it passes and they close{{end}}</td></tr>{{end}}
                 <tr><th>Position</th><td>#{{.Position}}{{if .Priority}} <span class="bucket bucket-priority">priority</span>{{end}}</td></tr>
                 <tr><th>Enqueued</th><td>{{relativeTime .EnqueuedAt}}</td></tr>
                 {{if .MergeBranchURL}}<tr><th>Merge Branch</th><td><a href="{{.MergeBranchURL}}">view on {{forgeName .Forge}} ↗</a></td></tr>{{end}}

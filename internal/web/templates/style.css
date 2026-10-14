@@ -44,6 +44,9 @@ a:hover { text-decoration: underline; }
 .state-success { background: var(--green-bg); color: var(--green-fg); }
 .state-failed { background: var(--red-bg); color: var(--red-fg); }
 .state-cancelled { background: var(--gray-bg); color: var(--gray-fg); }
+.state-queued-blocked { background: var(--purple-bg); color: var(--purple-fg); }
+.state-held { background: var(--green-bg); color: var(--purple-fg); }
+.state-merging { background: var(--green-bg); color: var(--green-fg); }
 .bucket { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.85em; margin-left: 4px; }
 .bucket-current { background: var(--yellow-bg); color: var(--yellow-fg); }
 .bucket-pending { background: var(--gray-bg); color: var(--gray-fg); }

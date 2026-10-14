@@ -226,11 +226,17 @@ the merge label), so queue state is visible and filterable in the PR list:
 
 | Label | Meaning |
 |---|---|
-| `mq/waiting` | Merge intent, but not queued yet: own CI not green or blocked by an open dependency |
+| `mq/waiting` | Merge intent, but not queued yet: own CI not green |
+| `mq/blocked` | Merge intent, but an open dependency keeps it out of the queue |
 | `mq/queued` | In the queue, waiting for its turn |
+| `mq/queued-blocked` | Queued only to be tested early (`GITEA_MQ_TEST_WHILE_BLOCKED`): an open dependency keeps it from landing |
 | `mq/testing` | Being tested on a merge branch (`GITEA_MQ_BATCH_MAX=1`) |
 | `mq/batch-N` | Member of batch N; the label is deleted when the batch ends |
+| `mq/held` | Tested and passed; lands as soon as its dependencies close |
 | `mq/merging` | Queue passed, waiting for the forge to merge |
+
+The repo and PR pages of the dashboard show the same states, and a PR's page
+names the open dependency that keeps it out of the queue or from landing.
 
 Labels are created on first use. This needs write access to issues/PRs: the
 Gitea token's `issue` scope, or on GitHub an App permission that allows

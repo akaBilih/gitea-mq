@@ -4,6 +4,7 @@
 package web
 
 import (
+	"context"
 	"embed"
 	"html/template"
 	"log/slog"
@@ -112,10 +113,9 @@ type OverviewData struct {
 type RepoDetailEntry struct {
 	PrNumber     int64
 	TargetBranch string
-	State        string
-	BatchBucket  string // current/pending/landed when in a live batch
+	State        string // batch.EntryState, the same word the PR's state label shows
+	BatchID      int64  // live batch the entry is in, 0 if none
 	Priority     bool
-	Waiting      bool // blocked by open dependencies, tested meanwhile
 }
 
 // RepoDetailBatch surfaces a live batch on the repo detail page.
@@ -152,7 +152,8 @@ type PRDetailData struct {
 	PrNumber        int64
 	Title           string
 	Author          string
-	State           string
+	State           string // batch.EntryState, the same word the PR's state label shows
+	Blockers        string // open dependencies, e.g. "#12, #15"; why a PR is kept out or may not land yet
 	Position        int
 	Priority        bool
 	EnqueuedAt      time.Time
@@ -257,6 +258,30 @@ func forgeFor(deps *Deps, ref forge.RepoRef) forge.Forge {
 	return f
 }
 
+// isLive reports whether b still owns its target branch's batch slot; a
+// finished or cancelled batch says nothing about where its members are now.
+func isLive(b *pg.Batch) bool {
+	switch b.State {
+	case pg.BatchStateForming, pg.BatchStateTesting, pg.BatchStateHeld:
+		return true
+	}
+	return false
+}
+
+// openBlockers lists the PR's open dependencies, e.g. "#12, #15", or "" when
+// there are none or the forge does not answer.
+func openBlockers(ctx context.Context, f forge.Forge, owner, name string, number int64) string {
+	deps, err := forge.OpenDependencies(ctx, f, owner, name, number)
+	if err != nil {
+		slog.Warn("failed to fetch PR dependencies", "pr", number, "error", err)
+		return ""
+	}
+	if len(deps) == 0 {
+		return ""
+	}
+	return forge.DependencyRefs(deps, owner, name)
+}
+
 // serverError logs err with the given message/args and replies 500.
 func serverError(w http.ResponseWriter, msg string, err error, args ...any) {
 	slog.Error(msg, append(args, "error", err)...)
@@ -354,18 +379,20 @@ func serveRepoDetail(w http.ResponseWriter, r *http.Request, deps *Deps, ref for
 		data.Batches = append(data.Batches, rb)
 	}
 
-	for _, e := range entries {
+	for i := range entries {
+		e := &entries[i]
+		var b *pg.Batch
+		if e.ActiveBatchID.Valid {
+			b = byID[e.ActiveBatchID.Int64]
+		}
 		de := RepoDetailEntry{
 			PrNumber:     e.PrNumber,
 			TargetBranch: e.TargetBranch,
-			State:        string(e.State),
+			State:        string(batch.StateOf(e, b)),
 			Priority:     e.Priority,
-			Waiting:      e.Waiting,
 		}
-		if e.ActiveBatchID.Valid {
-			if b := byID[e.ActiveBatchID.Int64]; b != nil {
-				de.BatchBucket = string(batch.Bucket(b, e.ID))
-			}
+		if b != nil {
+			de.BatchID = b.ID
 		}
 		data.Entries = append(data.Entries, de)
 	}
@@ -406,15 +433,33 @@ func servePRDetail(w http.ResponseWriter, r *http.Request, deps *Deps, ref forge
 		RefreshInterval: deps.RefreshInterval,
 	}
 
+	f := forgeFor(deps, ref)
 	if entry == nil {
-		// PR not in queue — render friendly page.
+		// Not queued: say why when an open dependency keeps it out.
 		data.InQueue = false
+		if f != nil {
+			if pr, err := f.GetPR(ctx, owner, name, prNumber); err == nil && pr != nil {
+				data.Title, data.PRURL = pr.Title, pr.HTMLURL
+				if pr.State == "open" {
+					data.Blockers = openBlockers(ctx, f, owner, name, prNumber)
+				}
+			}
+		}
 		renderHTML(w, "pr.html", data)
 		return
 	}
 
 	data.InQueue = true
-	data.State = string(entry.State)
+	var liveBatch *pg.Batch
+	if entry.ActiveBatchID.Valid {
+		if b, _ := deps.Queue.GetBatch(ctx, entry.ActiveBatchID.Int64); b != nil && isLive(b) {
+			liveBatch = b
+		}
+	}
+	data.State = string(batch.StateOf(entry, liveBatch))
+	if entry.Waiting && f != nil {
+		data.Blockers = openBlockers(ctx, f, owner, name, prNumber)
+	}
 	data.Priority = entry.Priority
 	if entry.EnqueuedAt.Valid {
 		data.EnqueuedAt = entry.EnqueuedAt.Time.UTC()
@@ -427,7 +472,6 @@ func servePRDetail(w http.ResponseWriter, r *http.Request, deps *Deps, ref forge
 	data.Position = int(pos)
 
 	// Fetch PR title/author from the forge (graceful degradation).
-	f := forgeFor(deps, ref)
 	if f != nil {
 		pr, err := f.GetPR(ctx, owner, name, prNumber)
 		if err != nil {
@@ -444,19 +488,17 @@ func servePRDetail(w http.ResponseWriter, r *http.Request, deps *Deps, ref forge
 		}
 	}
 
-	if entry.ActiveBatchID.Valid {
-		if b, _ := deps.Queue.GetBatch(ctx, entry.ActiveBatchID.Int64); b != nil {
-			data.BatchID = b.ID
-			data.BatchBucket = string(batch.Bucket(b, entry.ID))
-			members, _ := deps.Queue.GetEntriesByIDs(ctx, b.MemberIds)
-			for _, m := range members {
-				if m.PrNumber != prNumber {
-					data.BatchPRs = append(data.BatchPRs, m.PrNumber)
-				}
+	if b := liveBatch; b != nil {
+		data.BatchID = b.ID
+		data.BatchBucket = string(batch.Bucket(b, entry.ID))
+		members, _ := deps.Queue.GetEntriesByIDs(ctx, b.MemberIds)
+		for _, m := range members {
+			if m.PrNumber != prNumber {
+				data.BatchPRs = append(data.BatchPRs, m.PrNumber)
 			}
-			if f != nil && b.BranchName.Valid {
-				data.MergeBranchURL = f.BranchHTMLURL(owner, name, b.BranchName.String)
-			}
+		}
+		if f != nil && b.BranchName.Valid {
+			data.MergeBranchURL = f.BranchHTMLURL(owner, name, b.BranchName.String)
 		}
 	}
 

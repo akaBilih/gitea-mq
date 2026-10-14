@@ -7,37 +7,43 @@ import (
 	"log/slog"
 	"strings"
 
+	"github.com/Mic92/gitea-mq/internal/batch"
 	"github.com/Mic92/gitea-mq/internal/forge"
 	"github.com/Mic92/gitea-mq/internal/store/pg"
 )
 
+// Labels for PRs outside the queue; queued ones are labelled with their
+// batch.EntryState, as the dashboard shows it.
 const (
 	labelWaiting = "waiting"
-	labelQueued  = "queued"
-	labelTesting = "testing"
-	labelMerging = "merging"
+	labelBlocked = "blocked"
 	labelBatch   = "batch-"
 )
 
-// liveBatches filters out cancelled batches whose entries keep their active_batch_id.
-func desiredStateLabel(entry *pg.QueueEntry, intent bool, liveBatches map[int64]bool) string {
+// desiredStateLabel picks the one state label for a PR. blocked means this
+// poll kept it out of the queue for an open dependency; liveBatches excludes
+// cancelled batches whose entries keep their active_batch_id. Members of a live
+// batch carry the batch label, except those held after passing.
+func desiredStateLabel(entry *pg.QueueEntry, intent, blocked bool, liveBatches map[int64]*pg.Batch) string {
 	if entry == nil {
-		if intent {
+		switch {
+		case !intent:
+			return ""
+		case blocked:
+			return labelBlocked
+		default:
 			return labelWaiting
 		}
-		return ""
 	}
-	if entry.ActiveBatchID.Valid && liveBatches[entry.ActiveBatchID.Int64] {
-		return fmt.Sprintf("%s%d", labelBatch, entry.ActiveBatchID.Int64)
+	var b *pg.Batch
+	if entry.ActiveBatchID.Valid {
+		b = liveBatches[entry.ActiveBatchID.Int64]
 	}
-	switch entry.State {
-	case pg.EntryStateTesting:
-		return labelTesting
-	case pg.EntryStateSuccess:
-		return labelMerging
-	default:
-		return labelQueued
+	st := batch.StateOf(entry, b)
+	if b != nil && st != batch.StateHeld {
+		return fmt.Sprintf("%s%d", labelBatch, b.ID)
 	}
+	return string(st)
 }
 
 // syncStateLabels diffs against the labels already on each PR, so a settled queue costs no API calls.
@@ -59,15 +65,15 @@ func syncStateLabels(ctx context.Context, deps *Deps, result *PollResult, openPR
 	for i := range entries {
 		byPR[entries[i].PrNumber] = &entries[i]
 	}
-	liveBatches := map[int64]bool{}
+	liveBatches := map[int64]*pg.Batch{}
 	if deps.Batch.Enabled() {
 		bs, err := deps.Queue.ListLiveBatches(ctx, deps.RepoID)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("list batches for labels: %w", err))
 			return
 		}
-		for _, b := range bs {
-			liveBatches[b.ID] = true
+		for i := range bs {
+			liveBatches[bs[i].ID] = &bs[i]
 		}
 	}
 
@@ -83,7 +89,7 @@ func syncStateLabels(ctx context.Context, deps *Deps, result *PollResult, openPR
 		pr := &openPRs[i]
 		open[pr.Number] = true
 		intent := pr.AutoMergeEnabled || pr.HasLabel(deps.MergeLabel)
-		want := desiredStateLabel(byPR[pr.Number], intent, liveBatches)
+		want := desiredStateLabel(byPR[pr.Number], intent, deps.blockedPRs[pr.Number], liveBatches)
 		if want != "" {
 			want = deps.LabelPrefix + want
 		}

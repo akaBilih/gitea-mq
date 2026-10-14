@@ -728,6 +728,47 @@ func Bucket(b *pg.Batch, id int64) MemberBucket {
 	return ""
 }
 
+// EntryState is what a queued PR is doing right now. The dashboard and the
+// PR state labels both show it, so they cannot disagree; the stored entry
+// state alone does not say, since batch members keep "queued" while tested.
+type EntryState string
+
+const (
+	StateQueued EntryState = "queued"
+	// StateQueuedBlocked is queued only to be tested early: an open
+	// dependency keeps it from landing.
+	StateQueuedBlocked EntryState = "queued-blocked"
+	StateTesting       EntryState = "testing"
+	// StateHeld passed its tests and lands once its dependencies close.
+	StateHeld    EntryState = "held"
+	StateMerging EntryState = "merging"
+)
+
+// StateOf reports e's state. b is the live batch e belongs to, nil if none.
+func StateOf(e *pg.QueueEntry, b *pg.Batch) EntryState {
+	if b != nil {
+		switch Bucket(b, e.ID) {
+		case BucketCurrent:
+			return StateTesting
+		case BucketHeld:
+			return StateHeld
+		case BucketLanded:
+			return StateMerging
+		}
+		// A pending half waits for its turn like any queued PR.
+	}
+	switch e.State {
+	case pg.EntryStateTesting:
+		return StateTesting
+	case pg.EntryStateSuccess:
+		return StateMerging
+	}
+	if e.Waiting {
+		return StateQueuedBlocked
+	}
+	return StateQueued
+}
+
 func ids(entries []pg.QueueEntry) []int64 {
 	out := make([]int64, len(entries))
 	for i, e := range entries {

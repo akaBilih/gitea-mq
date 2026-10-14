@@ -156,6 +156,14 @@ func shortSHA(s string) string {
 	return s
 }
 
+// isCommitSHA reports whether s is a full SHA-1 or SHA-256 object name.
+func isCommitSHA(s string) bool {
+	if len(s) != 40 && len(s) != 64 {
+		return false
+	}
+	return strings.Trim(s, "0123456789abcdef") == ""
+}
+
 // IsNotFound returns true if the error is a 404 response.
 func IsNotFound(err error) bool {
 	var apiErr *APIError
@@ -515,12 +523,20 @@ type StackStep struct {
 // step is marked and subsequent heads merge onto the pre-failure tip. A
 // cache or final-push failure is returned as err so the caller can retry the
 // whole build instead of mis-attributing a transient error to one PR.
+//
+// base may also be a commit SHA: a batch stacking a new layer on what it has
+// already passed. That commit is in branch's history, so the new tip replaces
+// branch with a forced push; deleting the branch first instead would leave the
+// commit unreachable if every head then conflicted.
 func (c *HTTPClient) StackMerges(ctx context.Context, owner, repo, base string, heads []string, branch string) (string, []StackStep, error) {
 	steps := make([]StackStep, len(heads))
 	refs := []string{"+refs/heads/" + base + ":refs/heads/" + base}
+	current, label, force := "refs/heads/"+base, base, ""
+	if isCommitSHA(base) {
+		refs, current, label, force = []string{base}, base, shortSHA(base), "+"
+	}
 	var tip string
 	err := c.gitCache.withRepo(ctx, c.cloneURL(owner, repo), owner, repo, refs, func(run gitRunFunc) error {
-		current := "refs/heads/" + base
 		for i, head := range heads {
 			// Heads are fetched one by one so a vanished head SHA fails only
 			// its own step, not the whole batch.
@@ -529,7 +545,7 @@ func (c *HTTPClient) StackMerges(ctx context.Context, owner, repo, base string, 
 				continue
 			}
 			sha, _, err := mergeCommit(run, current, head,
-				fmt.Sprintf("mq: merge %s into %s", shortSHA(head), base))
+				fmt.Sprintf("mq: merge %s into %s", shortSHA(head), label))
 			if err != nil {
 				steps[i].Err = fmt.Errorf("merge %s: %w", shortSHA(head), err)
 				continue
@@ -543,7 +559,7 @@ func (c *HTTPClient) StackMerges(ctx context.Context, owner, repo, base string, 
 		if tip == "" {
 			return nil
 		}
-		if _, err := run("push", "--quiet", "origin", tip+":refs/heads/"+branch); err != nil {
+		if _, err := run("push", "--quiet", "origin", force+tip+":refs/heads/"+branch); err != nil {
 			return fmt.Errorf("push %s: %w", branch, err)
 		}
 		return nil

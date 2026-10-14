@@ -156,8 +156,18 @@ UPDATE batches SET
     builds = $9,
     ff_retries = $10,
     flaky = $11,
-    testing_started_at = $12
+    testing_started_at = $12,
+    held_ids = $13,
+    held_sha = $14
 WHERE id = $1 AND state IN ('forming', 'testing', 'held')
+RETURNING *;
+
+-- name: ExtendBatchMembers :one
+UPDATE batches SET
+    member_ids = member_ids || @ids::bigint[],
+    current_ids = @ids::bigint[],
+    state = 'forming'
+WHERE id = @id
 RETURNING *;
 
 -- name: CancelBatchesByRepo :exec

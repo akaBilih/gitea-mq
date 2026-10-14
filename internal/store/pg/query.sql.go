@@ -90,7 +90,7 @@ func (q *Queries) CountQueued(ctx context.Context, arg CountQueuedParams) (Count
 const createBatch = `-- name: CreateBatch :one
 INSERT INTO batches (repo_id, target_branch, member_ids, current_ids)
 VALUES ($1, $2, $3, $3)
-RETURNING id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at
+RETURNING id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at, held_ids, held_sha
 `
 
 type CreateBatchParams struct {
@@ -119,6 +119,8 @@ func (q *Queries) CreateBatch(ctx context.Context, arg CreateBatchParams) (Batch
 		&i.Flaky,
 		&i.CreatedAt,
 		&i.TestingStartedAt,
+		&i.HeldIds,
+		&i.HeldSha,
 	)
 	return i, err
 }
@@ -206,8 +208,48 @@ func (q *Queries) EnqueuePR(ctx context.Context, arg EnqueuePRParams) (QueueEntr
 	return i, err
 }
 
+const extendBatchMembers = `-- name: ExtendBatchMembers :one
+UPDATE batches SET
+    member_ids = member_ids || $1::bigint[],
+    current_ids = $1::bigint[],
+    state = 'forming'
+WHERE id = $2
+RETURNING id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at, held_ids, held_sha
+`
+
+type ExtendBatchMembersParams struct {
+	Ids []int64 `json:"ids"`
+	ID  int64   `json:"id"`
+}
+
+func (q *Queries) ExtendBatchMembers(ctx context.Context, arg ExtendBatchMembersParams) (Batch, error) {
+	row := q.db.QueryRow(ctx, extendBatchMembers, arg.Ids, arg.ID)
+	var i Batch
+	err := row.Scan(
+		&i.ID,
+		&i.RepoID,
+		&i.TargetBranch,
+		&i.State,
+		&i.MemberIds,
+		&i.CurrentIds,
+		&i.Pending,
+		&i.LandedIds,
+		&i.EjectedIds,
+		&i.BranchName,
+		&i.BranchSha,
+		&i.Builds,
+		&i.FfRetries,
+		&i.Flaky,
+		&i.CreatedAt,
+		&i.TestingStartedAt,
+		&i.HeldIds,
+		&i.HeldSha,
+	)
+	return i, err
+}
+
 const getBatch = `-- name: GetBatch :one
-SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at FROM batches WHERE id = $1
+SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at, held_ids, held_sha FROM batches WHERE id = $1
 `
 
 func (q *Queries) GetBatch(ctx context.Context, id int64) (Batch, error) {
@@ -230,6 +272,8 @@ func (q *Queries) GetBatch(ctx context.Context, id int64) (Batch, error) {
 		&i.Flaky,
 		&i.CreatedAt,
 		&i.TestingStartedAt,
+		&i.HeldIds,
+		&i.HeldSha,
 	)
 	return i, err
 }
@@ -343,7 +387,7 @@ func (q *Queries) GetHeadOfQueue(ctx context.Context, arg GetHeadOfQueueParams) 
 }
 
 const getLiveBatch = `-- name: GetLiveBatch :one
-SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at FROM batches
+SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at, held_ids, held_sha FROM batches
 WHERE repo_id = $1 AND target_branch = $2 AND state IN ('forming', 'testing', 'held')
 `
 
@@ -372,6 +416,8 @@ func (q *Queries) GetLiveBatch(ctx context.Context, arg GetLiveBatchParams) (Bat
 		&i.Flaky,
 		&i.CreatedAt,
 		&i.TestingStartedAt,
+		&i.HeldIds,
+		&i.HeldSha,
 	)
 	return i, err
 }
@@ -481,7 +527,7 @@ func (q *Queries) ListActiveEntriesByRepo(ctx context.Context, repoID int64) ([]
 }
 
 const listLiveBatchesByRepo = `-- name: ListLiveBatchesByRepo :many
-SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at FROM batches
+SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at, held_ids, held_sha FROM batches
 WHERE repo_id = $1 AND state IN ('forming', 'testing', 'held')
 `
 
@@ -511,6 +557,8 @@ func (q *Queries) ListLiveBatchesByRepo(ctx context.Context, repoID int64) ([]Ba
 			&i.Flaky,
 			&i.CreatedAt,
 			&i.TestingStartedAt,
+			&i.HeldIds,
+			&i.HeldSha,
 		); err != nil {
 			return nil, err
 		}
@@ -546,9 +594,11 @@ UPDATE batches SET
     builds = $9,
     ff_retries = $10,
     flaky = $11,
-    testing_started_at = $12
+    testing_started_at = $12,
+    held_ids = $13,
+    held_sha = $14
 WHERE id = $1 AND state IN ('forming', 'testing', 'held')
-RETURNING id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at
+RETURNING id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at, held_ids, held_sha
 `
 
 type SaveBatchParams struct {
@@ -564,6 +614,8 @@ type SaveBatchParams struct {
 	FfRetries        int32              `json:"ff_retries"`
 	Flaky            bool               `json:"flaky"`
 	TestingStartedAt pgtype.Timestamptz `json:"testing_started_at"`
+	HeldIds          []int64            `json:"held_ids"`
+	HeldSha          pgtype.Text        `json:"held_sha"`
 }
 
 func (q *Queries) SaveBatch(ctx context.Context, arg SaveBatchParams) (Batch, error) {
@@ -580,6 +632,8 @@ func (q *Queries) SaveBatch(ctx context.Context, arg SaveBatchParams) (Batch, er
 		arg.FfRetries,
 		arg.Flaky,
 		arg.TestingStartedAt,
+		arg.HeldIds,
+		arg.HeldSha,
 	)
 	var i Batch
 	err := row.Scan(
@@ -599,6 +653,8 @@ func (q *Queries) SaveBatch(ctx context.Context, arg SaveBatchParams) (Batch, er
 		&i.Flaky,
 		&i.CreatedAt,
 		&i.TestingStartedAt,
+		&i.HeldIds,
+		&i.HeldSha,
 	)
 	return i, err
 }

@@ -162,6 +162,8 @@ type Batch struct {
 	Flaky            bool               `json:"flaky"`
 	CreatedAt        pgtype.Timestamptz `json:"created_at"`
 	TestingStartedAt pgtype.Timestamptz `json:"testing_started_at"`
+	HeldIds          []int64            `json:"held_ids"`
+	HeldSha          pgtype.Text        `json:"held_sha"`
 }
 
 type CheckStatus struct {

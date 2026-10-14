@@ -184,45 +184,97 @@ func TestTestWhileBlocked_RetestsWhenTargetMoves(t *testing.T) {
 	}
 }
 
-// A PR blocked after the batch passed joins it: the batch is formed again with
-// everyone, so all of them land at once when the dependency closes.
-func TestTestWhileBlocked_NewlyBlockedPRJoinsHeldBatch(t *testing.T) {
+// PRs blocked after the batch passed are tested as layers of up to BatchMax on
+// top of it, never retesting what it holds; every layer that passes joins it,
+// and the whole stack lands in one fast-forward when the dependency closes.
+func TestTestWhileBlocked_LayersAccumulateAndLandTogether(t *testing.T) {
 	e, f, svc, ctx := setupBlocked(t, 10)
+	e.BatchMax = 2
 	open := true
-	blockedBy(f, &open, 10, 20)
-	holdAll(t, e, svc, ctx)
-
-	if _, err := svc.EnqueueWaiting(ctx, e.RepoID, 20, "sha20", "main", false); err != nil {
-		t.Fatal(err)
-	}
-	b, err := e.FormAndBuild(ctx, "main")
-	if err != nil || b == nil {
-		t.Fatalf("held batch not re-formed with the newcomer: %v", err)
-	}
-	if b.BranchSha.String != "m(m(main0,sha10),sha20)" {
-		t.Fatalf("want both tested together, got %+v", b)
+	blockedBy(f, &open, 10, 20, 30, 40)
+	held := holdAll(t, e, svc, ctx)
+	for _, n := range []int64{20, 30, 40} {
+		if _, err := svc.EnqueueWaiting(ctx, e.RepoID, n, fmt.Sprintf("sha%d", n), "main", false); err != nil {
+			t.Fatal(err)
+		}
 	}
 
-	// Full: a batch of BatchMax members does not reopen.
-	e2, f2, svc2, ctx2 := setupBlocked(t, 10, 20)
-	e2.BatchMax = 2
-	blockedBy(f2, &open, 10, 20, 30)
-	held := holdAll(t, e2, svc2, ctx2)
-	if _, err := svc2.EnqueueWaiting(ctx2, e2.RepoID, 30, "sha30", "main", false); err != nil {
+	// A layer of two on top of #10, then a layer of one on top of all three.
+	for _, want := range []string{
+		"m(m(m(main0,sha10),sha20),sha30)",
+		"m(m(m(m(main0,sha10),sha20),sha30),sha40)",
+	} {
+		if _, err := e.FormAndBuild(ctx, "main"); err != nil {
+			t.Fatal(err)
+		}
+		b := mustLive(t, svc, ctx, e.RepoID)
+		if b.ID != held.ID || b.State != pg.BatchStateTesting || b.BranchSha.String != want {
+			t.Fatalf("want a layer of batch #%d tested as %q, got %+v", held.ID, want, b)
+		}
+		if err := e.HandlePass(ctx, b); err != nil {
+			t.Fatal(err)
+		}
+	}
+	b := mustLive(t, svc, ctx, e.RepoID)
+	if b.State != pg.BatchStateHeld || len(b.HeldIds) != 4 || len(b.CurrentIds) != 0 {
+		t.Fatalf("want all four held, got %+v", b)
+	}
+	if n := len(f.CallsTo("CreateMergeBranch")) + len(f.CallsTo("MergeInto")); n != 4 {
+		t.Fatalf("%d merges; each PR is merged once, nothing held is rebuilt", n)
+	}
+
+	open = false
+	for _, n := range []int64{10, 20, 30, 40} {
+		if err := svc.SetWaiting(ctx, entryID(t, svc, ctx, e.RepoID, n), false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := e.FormAndBuild(ctx, "main"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e2.FormAndBuild(ctx2, "main"); err != nil {
-		t.Fatal(err)
+	if want := "m(m(m(m(main0,sha10),sha20),sha30),sha40)"; f.target != want {
+		t.Fatalf("target = %q, want the whole stack %q", f.target, want)
 	}
-	if live := mustLive(t, svc2, ctx2, e2.RepoID); live.ID != held.ID || live.State != pg.BatchStateHeld {
-		t.Fatalf("full held batch re-formed: %+v", live)
+	if b, _ := svc.GetBatch(ctx, held.ID); b.State != pg.BatchStateDone || len(b.LandedIds) != 4 {
+		t.Fatalf("want all four landed, got %+v", b)
 	}
 }
 
-// Bisecting blocked PRs: nothing can land for the next half to build on, so a
-// passing half goes back to the queue and the last one is held. The half sent
-// back does not re-form the batch: together they failed, and would forever.
-func TestTestWhileBlocked_BisectionHoldsLastHalfWithoutLooping(t *testing.T) {
+// A failing layer is bisected on its own: the culprit is ejected and what the
+// batch already holds stays held as it was, untouched.
+func TestTestWhileBlocked_FailingLayerLeavesHeldAlone(t *testing.T) {
+	e, f, svc, ctx := setupBlocked(t, 10)
+	open := true
+	blockedBy(f, &open, 10, 20)
+	held := holdAll(t, e, svc, ctx)
+	passed := held.BranchSha.String
+	if _, err := svc.EnqueueWaiting(ctx, e.RepoID, 20, "sha20", "main", false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := e.FormAndBuild(ctx, "main"); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.HandleFail(ctx, mustLive(t, svc, ctx, e.RepoID), "ci", ""); err != nil {
+		t.Fatal(err)
+	}
+	b := mustLive(t, svc, ctx, e.RepoID)
+	id10 := entryID(t, svc, ctx, e.RepoID, 10)
+	if b.ID != held.ID || b.State != pg.BatchStateHeld || b.BranchSha.String != passed || !slices.Equal(b.HeldIds, []int64{id10}) {
+		t.Fatalf("want #10 held as before at %q, got %+v", passed, b)
+	}
+	if ent, _ := svc.GetEntry(ctx, e.RepoID, 20); ent != nil {
+		t.Fatalf("#20 failed and should have left the queue: %+v", ent)
+	}
+	if n := len(f.CallsTo("CancelAutoMerge")); n != 1 {
+		t.Fatalf("CancelAutoMerge calls = %d, want #20's only", n)
+	}
+}
+
+// Bisecting blocked PRs works as with ready ones: a passing half is kept in
+// the tree as if it had landed, the next half is tested on top of it, and the
+// culprit is ejected. Nothing goes back to the queue, so nothing can loop.
+func TestTestWhileBlocked_BisectionStacksPassingHalf(t *testing.T) {
 	e, f, svc, ctx := setupBlocked(t, 10, 20)
 	open := true
 	blockedBy(f, &open, 10, 20)
@@ -236,26 +288,19 @@ func TestTestWhileBlocked_BisectionHoldsLastHalfWithoutLooping(t *testing.T) {
 	if err := e.HandlePass(ctx, b); err != nil { // #10 alone
 		t.Fatal(err)
 	}
-	id20 := entryID(t, svc, ctx, e.RepoID, 20)
-	if !slices.Equal(b.CurrentIds, []int64{id20}) || b.BranchSha.String != "m(main0,sha20)" {
-		t.Fatalf("want #20 tested next on main0, got %+v", b)
+	id10, id20 := entryID(t, svc, ctx, e.RepoID, 10), entryID(t, svc, ctx, e.RepoID, 20)
+	if !slices.Equal(b.HeldIds, []int64{id10}) || !slices.Equal(b.CurrentIds, []int64{id20}) ||
+		b.BranchSha.String != "m(m(main0,sha10),sha20)" {
+		t.Fatalf("want #20 tested on top of #10, got %+v", b)
 	}
-	if ent, _ := svc.GetEntry(ctx, e.RepoID, 10); ent == nil || ent.State != pg.EntryStateQueued || !ent.Waiting {
-		t.Fatalf("#10 should be back in the queue, waiting: %+v", ent)
-	}
-	if err := e.HandlePass(ctx, b); err != nil { // #20 alone
+	if err := e.HandleFail(ctx, b, "ci", ""); err != nil { // #20 is the culprit
 		t.Fatal(err)
 	}
-
-	if _, err := e.FormAndBuild(ctx, "main"); err != nil {
-		t.Fatal(err)
+	if b.State != pg.BatchStateHeld || b.BranchSha.String != "m(main0,sha10)" || !slices.Equal(b.HeldIds, []int64{id10}) {
+		t.Fatalf("want #10 held alone, got %+v", b)
 	}
-	live := mustLive(t, svc, ctx, e.RepoID)
-	if live.ID != b.ID || live.State != pg.BatchStateHeld || !slices.Equal(live.CurrentIds, []int64{id20}) {
-		t.Fatalf("want #20 still held alone, got %+v", live)
-	}
-	if n := len(f.CallsTo("Comment")) + len(f.CallsTo("CancelAutoMerge")); n != 0 {
-		t.Fatalf("%d comment/cancel call(s); a passing half was treated as failed", n)
+	if n := len(f.CallsTo("CancelAutoMerge")); n != 1 {
+		t.Fatalf("CancelAutoMerge calls = %d, want #20's only", n)
 	}
 }
 

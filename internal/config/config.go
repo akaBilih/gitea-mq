@@ -31,9 +31,12 @@ type Config struct {
 	SkipQueueIfUpToDate bool
 	BatchMax            int
 	BisectMaxSteps      int
-	RefreshInterval     time.Duration
-	DiscoveryInterval   time.Duration
-	LogLevel            string
+	// TestWhileBlocked tests PRs whose open dependencies cannot move the
+	// target branch before they may land, so they land without waiting for CI.
+	TestWhileBlocked  bool
+	RefreshInterval   time.Duration
+	DiscoveryInterval time.Duration
+	LogLevel          string
 	// CacheDir holds persistent bare git clones used for merge operations.
 	CacheDir string
 }
@@ -172,6 +175,15 @@ func Load() (*Config, error) {
 	cfg.BisectMaxSteps, err = parseInt("GITEA_MQ_BISECT_MAX_STEPS", 0, 0)
 	if err != nil {
 		return nil, err
+	}
+	cfg.TestWhileBlocked, err = parseBool("GITEA_MQ_TEST_WHILE_BLOCKED", false)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.TestWhileBlocked && cfg.BatchMax == 1 {
+		// Only a batch lands by fast-forward; the forge's own merge would
+		// refuse the PR again once it is tested.
+		return nil, fmt.Errorf("GITEA_MQ_TEST_WHILE_BLOCKED requires batching (GITEA_MQ_BATCH_MAX other than 1)")
 	}
 
 	cfg.CacheDir = os.Getenv("GITEA_MQ_CACHE_DIR")

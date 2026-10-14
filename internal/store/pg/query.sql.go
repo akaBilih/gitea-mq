@@ -13,7 +13,7 @@ import (
 
 const cancelBatchesByRepo = `-- name: CancelBatchesByRepo :exec
 UPDATE batches SET state = 'cancelled'
-WHERE repo_id = $1 AND state IN ('forming', 'testing')
+WHERE repo_id = $1 AND state IN ('forming', 'testing', 'held')
 `
 
 func (q *Queries) CancelBatchesByRepo(ctx context.Context, repoID int64) error {
@@ -62,6 +62,30 @@ func (q *Queries) CountQueuePosition(ctx context.Context, arg CountQueuePosition
 	var count int64
 	err := row.Scan(&count)
 	return count, err
+}
+
+const countQueued = `-- name: CountQueued :one
+SELECT COUNT(*) FILTER (WHERE NOT waiting) AS ready,
+       COUNT(*) FILTER (WHERE waiting)     AS waiting
+FROM queue_entries
+WHERE repo_id = $1 AND target_branch = $2 AND state = 'queued'
+`
+
+type CountQueuedParams struct {
+	RepoID       int64  `json:"repo_id"`
+	TargetBranch string `json:"target_branch"`
+}
+
+type CountQueuedRow struct {
+	Ready   int64 `json:"ready"`
+	Waiting int64 `json:"waiting"`
+}
+
+func (q *Queries) CountQueued(ctx context.Context, arg CountQueuedParams) (CountQueuedRow, error) {
+	row := q.db.QueryRow(ctx, countQueued, arg.RepoID, arg.TargetBranch)
+	var i CountQueuedRow
+	err := row.Scan(&i.Ready, &i.Waiting)
+	return i, err
 }
 
 const createBatch = `-- name: CreateBatch :one
@@ -136,10 +160,10 @@ func (q *Queries) DequeuePR(ctx context.Context, arg DequeuePRParams) error {
 }
 
 const enqueuePR = `-- name: EnqueuePR :one
-INSERT INTO queue_entries (repo_id, pr_number, pr_head_sha, target_branch)
-VALUES ($1, $2, $3, $4)
+INSERT INTO queue_entries (repo_id, pr_number, pr_head_sha, target_branch, waiting)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (repo_id, pr_number) DO NOTHING
-RETURNING id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id
+RETURNING id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id, waiting
 `
 
 type EnqueuePRParams struct {
@@ -147,6 +171,7 @@ type EnqueuePRParams struct {
 	PrNumber     int64  `json:"pr_number"`
 	PrHeadSha    string `json:"pr_head_sha"`
 	TargetBranch string `json:"target_branch"`
+	Waiting      bool   `json:"waiting"`
 }
 
 func (q *Queries) EnqueuePR(ctx context.Context, arg EnqueuePRParams) (QueueEntry, error) {
@@ -155,6 +180,7 @@ func (q *Queries) EnqueuePR(ctx context.Context, arg EnqueuePRParams) (QueueEntr
 		arg.PrNumber,
 		arg.PrHeadSha,
 		arg.TargetBranch,
+		arg.Waiting,
 	)
 	var i QueueEntry
 	err := row.Scan(
@@ -171,6 +197,7 @@ func (q *Queries) EnqueuePR(ctx context.Context, arg EnqueuePRParams) (QueueEntr
 		&i.MergeBranchSha,
 		&i.ErrorMessage,
 		&i.ActiveBatchID,
+		&i.Waiting,
 	)
 	return i, err
 }
@@ -236,7 +263,7 @@ func (q *Queries) GetCheckStatuses(ctx context.Context, queueEntryID int64) ([]C
 }
 
 const getEntriesByIDs = `-- name: GetEntriesByIDs :many
-SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id FROM queue_entries
+SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id, waiting FROM queue_entries
 WHERE id = ANY($1::bigint[])
 `
 
@@ -263,6 +290,7 @@ func (q *Queries) GetEntriesByIDs(ctx context.Context, ids []int64) ([]QueueEntr
 			&i.MergeBranchSha,
 			&i.ErrorMessage,
 			&i.ActiveBatchID,
+			&i.Waiting,
 		); err != nil {
 			return nil, err
 		}
@@ -275,7 +303,7 @@ func (q *Queries) GetEntriesByIDs(ctx context.Context, ids []int64) ([]QueueEntr
 }
 
 const getHeadOfQueue = `-- name: GetHeadOfQueue :one
-SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id FROM queue_entries
+SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id, waiting FROM queue_entries
 WHERE repo_id = $1 AND target_branch = $2
 ORDER BY enqueued_at ASC
 LIMIT 1
@@ -303,13 +331,14 @@ func (q *Queries) GetHeadOfQueue(ctx context.Context, arg GetHeadOfQueueParams) 
 		&i.MergeBranchSha,
 		&i.ErrorMessage,
 		&i.ActiveBatchID,
+		&i.Waiting,
 	)
 	return i, err
 }
 
 const getLiveBatch = `-- name: GetLiveBatch :one
 SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at FROM batches
-WHERE repo_id = $1 AND target_branch = $2 AND state IN ('forming', 'testing')
+WHERE repo_id = $1 AND target_branch = $2 AND state IN ('forming', 'testing', 'held')
 `
 
 type GetLiveBatchParams struct {
@@ -368,7 +397,7 @@ func (q *Queries) GetOrCreateRepo(ctx context.Context, arg GetOrCreateRepoParams
 }
 
 const getQueueEntry = `-- name: GetQueueEntry :one
-SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id FROM queue_entries
+SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id, waiting FROM queue_entries
 WHERE repo_id = $1 AND pr_number = $2
 `
 
@@ -394,12 +423,13 @@ func (q *Queries) GetQueueEntry(ctx context.Context, arg GetQueueEntryParams) (Q
 		&i.MergeBranchSha,
 		&i.ErrorMessage,
 		&i.ActiveBatchID,
+		&i.Waiting,
 	)
 	return i, err
 }
 
 const listActiveEntriesByRepo = `-- name: ListActiveEntriesByRepo :many
-SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id FROM queue_entries
+SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id, waiting FROM queue_entries
 WHERE repo_id = $1 AND state NOT IN ('failed', 'cancelled')
 ORDER BY target_branch, enqueued_at ASC
 `
@@ -427,6 +457,7 @@ func (q *Queries) ListActiveEntriesByRepo(ctx context.Context, repoID int64) ([]
 			&i.MergeBranchSha,
 			&i.ErrorMessage,
 			&i.ActiveBatchID,
+			&i.Waiting,
 		); err != nil {
 			return nil, err
 		}
@@ -440,7 +471,7 @@ func (q *Queries) ListActiveEntriesByRepo(ctx context.Context, repoID int64) ([]
 
 const listLiveBatchesByRepo = `-- name: ListLiveBatchesByRepo :many
 SELECT id, repo_id, target_branch, state, member_ids, current_ids, pending, landed_ids, ejected_ids, branch_name, branch_sha, builds, ff_retries, flaky, created_at, testing_started_at FROM batches
-WHERE repo_id = $1 AND state IN ('forming', 'testing')
+WHERE repo_id = $1 AND state IN ('forming', 'testing', 'held')
 `
 
 func (q *Queries) ListLiveBatchesByRepo(ctx context.Context, repoID int64) ([]Batch, error) {
@@ -481,7 +512,7 @@ func (q *Queries) ListLiveBatchesByRepo(ctx context.Context, repoID int64) ([]Ba
 }
 
 const listQueue = `-- name: ListQueue :many
-SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id FROM queue_entries
+SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id, waiting FROM queue_entries
 WHERE repo_id = $1 AND target_branch = $2
 ORDER BY enqueued_at ASC
 `
@@ -514,6 +545,7 @@ func (q *Queries) ListQueue(ctx context.Context, arg ListQueueParams) ([]QueueEn
 			&i.MergeBranchSha,
 			&i.ErrorMessage,
 			&i.ActiveBatchID,
+			&i.Waiting,
 		); err != nil {
 			return nil, err
 		}
@@ -526,7 +558,7 @@ func (q *Queries) ListQueue(ctx context.Context, arg ListQueueParams) ([]QueueEn
 }
 
 const loadActiveQueues = `-- name: LoadActiveQueues :many
-SELECT qe.id, qe.repo_id, qe.pr_number, qe.pr_head_sha, qe.target_branch, qe.state, qe.enqueued_at, qe.testing_started_at, qe.completed_at, qe.merge_branch_name, qe.merge_branch_sha, qe.error_message, qe.active_batch_id, r.forge, r.owner, r.name AS repo_name
+SELECT qe.id, qe.repo_id, qe.pr_number, qe.pr_head_sha, qe.target_branch, qe.state, qe.enqueued_at, qe.testing_started_at, qe.completed_at, qe.merge_branch_name, qe.merge_branch_sha, qe.error_message, qe.active_batch_id, qe.waiting, r.forge, r.owner, r.name AS repo_name
 FROM queue_entries qe
 JOIN repos r ON r.id = qe.repo_id
 WHERE qe.state NOT IN ('failed', 'cancelled')
@@ -547,6 +579,7 @@ type LoadActiveQueuesRow struct {
 	MergeBranchSha   pgtype.Text        `json:"merge_branch_sha"`
 	ErrorMessage     pgtype.Text        `json:"error_message"`
 	ActiveBatchID    pgtype.Int8        `json:"active_batch_id"`
+	Waiting          bool               `json:"waiting"`
 	Forge            string             `json:"forge"`
 	Owner            string             `json:"owner"`
 	RepoName         string             `json:"repo_name"`
@@ -575,6 +608,7 @@ func (q *Queries) LoadActiveQueues(ctx context.Context) ([]LoadActiveQueuesRow, 
 			&i.MergeBranchSha,
 			&i.ErrorMessage,
 			&i.ActiveBatchID,
+			&i.Waiting,
 			&i.Forge,
 			&i.Owner,
 			&i.RepoName,
@@ -587,6 +621,18 @@ func (q *Queries) LoadActiveQueues(ctx context.Context) ([]LoadActiveQueuesRow, 
 		return nil, err
 	}
 	return items, nil
+}
+
+const requeueEntries = `-- name: RequeueEntries :exec
+UPDATE queue_entries
+SET state = 'queued', active_batch_id = NULL,
+    merge_branch_name = NULL, merge_branch_sha = NULL
+WHERE id = ANY($1::bigint[])
+`
+
+func (q *Queries) RequeueEntries(ctx context.Context, ids []int64) error {
+	_, err := q.db.Exec(ctx, requeueEntries, ids)
+	return err
 }
 
 const saveBatch = `-- name: SaveBatch :one
@@ -699,21 +745,42 @@ func (q *Queries) SetEntryActiveBatch(ctx context.Context, arg SetEntryActiveBat
 	return err
 }
 
+const setEntryWaiting = `-- name: SetEntryWaiting :exec
+UPDATE queue_entries SET waiting = $1
+WHERE id = $2
+`
+
+type SetEntryWaitingParams struct {
+	Waiting bool  `json:"waiting"`
+	ID      int64 `json:"id"`
+}
+
+func (q *Queries) SetEntryWaiting(ctx context.Context, arg SetEntryWaitingParams) error {
+	_, err := q.db.Exec(ctx, setEntryWaiting, arg.Waiting, arg.ID)
+	return err
+}
+
 const takeQueuedHead = `-- name: TakeQueuedHead :many
-SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id FROM queue_entries
-WHERE repo_id = $1 AND target_branch = $2 AND state = 'queued'
+SELECT id, repo_id, pr_number, pr_head_sha, target_branch, state, enqueued_at, testing_started_at, completed_at, merge_branch_name, merge_branch_sha, error_message, active_batch_id, waiting FROM queue_entries
+WHERE repo_id = $1 AND target_branch = $2 AND state = 'queued' AND waiting = $3
 ORDER BY enqueued_at ASC
-LIMIT $3
+LIMIT $4
 `
 
 type TakeQueuedHeadParams struct {
 	RepoID       int64  `json:"repo_id"`
 	TargetBranch string `json:"target_branch"`
+	Waiting      bool   `json:"waiting"`
 	Limit        int32  `json:"limit"`
 }
 
 func (q *Queries) TakeQueuedHead(ctx context.Context, arg TakeQueuedHeadParams) ([]QueueEntry, error) {
-	rows, err := q.db.Query(ctx, takeQueuedHead, arg.RepoID, arg.TargetBranch, arg.Limit)
+	rows, err := q.db.Query(ctx, takeQueuedHead,
+		arg.RepoID,
+		arg.TargetBranch,
+		arg.Waiting,
+		arg.Limit,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -735,6 +802,7 @@ func (q *Queries) TakeQueuedHead(ctx context.Context, arg TakeQueuedHeadParams) 
 			&i.MergeBranchSha,
 			&i.ErrorMessage,
 			&i.ActiveBatchID,
+			&i.Waiting,
 		); err != nil {
 			return nil, err
 		}

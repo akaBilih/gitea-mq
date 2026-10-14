@@ -5,10 +5,26 @@ ON CONFLICT (forge, owner, name) DO UPDATE SET owner = EXCLUDED.owner
 RETURNING *;
 
 -- name: EnqueuePR :one
-INSERT INTO queue_entries (repo_id, pr_number, pr_head_sha, target_branch)
-VALUES ($1, $2, $3, $4)
+INSERT INTO queue_entries (repo_id, pr_number, pr_head_sha, target_branch, waiting)
+VALUES ($1, $2, $3, $4, $5)
 ON CONFLICT (repo_id, pr_number) DO NOTHING
 RETURNING *;
+
+-- name: SetEntryWaiting :exec
+UPDATE queue_entries SET waiting = @waiting
+WHERE id = @id;
+
+-- name: RequeueEntries :exec
+UPDATE queue_entries
+SET state = 'queued', active_batch_id = NULL,
+    merge_branch_name = NULL, merge_branch_sha = NULL
+WHERE id = ANY(@ids::bigint[]);
+
+-- name: CountQueued :one
+SELECT COUNT(*) FILTER (WHERE NOT waiting) AS ready,
+       COUNT(*) FILTER (WHERE waiting)     AS waiting
+FROM queue_entries
+WHERE repo_id = $1 AND target_branch = $2 AND state = 'queued';
 
 -- name: DequeuePR :exec
 DELETE FROM queue_entries
@@ -82,9 +98,9 @@ WHERE repo_id = $1;
 
 -- name: TakeQueuedHead :many
 SELECT * FROM queue_entries
-WHERE repo_id = $1 AND target_branch = $2 AND state = 'queued'
+WHERE repo_id = $1 AND target_branch = $2 AND state = 'queued' AND waiting = $3
 ORDER BY enqueued_at ASC
-LIMIT $3;
+LIMIT $4;
 
 -- name: GetEntriesByIDs :many
 SELECT * FROM queue_entries
@@ -119,11 +135,11 @@ SELECT * FROM batches WHERE id = $1;
 
 -- name: GetLiveBatch :one
 SELECT * FROM batches
-WHERE repo_id = $1 AND target_branch = $2 AND state IN ('forming', 'testing');
+WHERE repo_id = $1 AND target_branch = $2 AND state IN ('forming', 'testing', 'held');
 
 -- name: ListLiveBatchesByRepo :many
 SELECT * FROM batches
-WHERE repo_id = $1 AND state IN ('forming', 'testing');
+WHERE repo_id = $1 AND state IN ('forming', 'testing', 'held');
 
 -- name: SaveBatch :one
 UPDATE batches SET
@@ -143,4 +159,4 @@ RETURNING *;
 
 -- name: CancelBatchesByRepo :exec
 UPDATE batches SET state = 'cancelled'
-WHERE repo_id = $1 AND state IN ('forming', 'testing');
+WHERE repo_id = $1 AND state IN ('forming', 'testing', 'held');

@@ -346,7 +346,7 @@ func (f *giteaForge) OpenDependencies(ctx context.Context, owner, name string, n
 		if is.State != "open" {
 			continue
 		}
-		d := forge.Dependency{Number: is.Index}
+		d := forge.Dependency{Number: is.Index, PR: is.PullRequest != nil}
 		if is.Repository != nil {
 			d.Repo = is.Repository.FullName
 		}

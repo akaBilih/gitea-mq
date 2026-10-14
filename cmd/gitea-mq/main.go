@@ -131,6 +131,7 @@ func run() error {
 		SkipQueueIfUpToDate: cfg.SkipQueueIfUpToDate,
 		BatchMax:            cfg.BatchMax,
 		BisectMaxSteps:      cfg.BisectMaxSteps,
+		TestWhileBlocked:    cfg.TestWhileBlocked,
 	})
 
 	discTrigger := make(chan struct{}, 1)

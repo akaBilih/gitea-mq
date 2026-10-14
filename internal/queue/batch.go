@@ -13,8 +13,9 @@ import (
 // FormBatch atomically takes up to max queued entries for (repo, branch),
 // creates a batch row owning them, and marks each entry testing with
 // active_batch_id set. Returns nil when there is nothing queued.
-// max <= 0 means "everything currently queued".
-func (s *Service) FormBatch(ctx context.Context, repoID int64, targetBranch string, max int) (*pg.Batch, error) {
+// max <= 0 means "everything currently queued". waiting selects entries that
+// are queued only to be tested early; a batch never mixes the two kinds.
+func (s *Service) FormBatch(ctx context.Context, repoID int64, targetBranch string, max int, waiting bool) (*pg.Batch, error) {
 	var batch pg.Batch
 	if max <= 0 {
 		// Postgres LIMIT NULL is awkward through sqlc; a generous cap is
@@ -25,6 +26,7 @@ func (s *Service) FormBatch(ctx context.Context, repoID int64, targetBranch stri
 		entries, err := q.TakeQueuedHead(ctx, pg.TakeQueuedHeadParams{
 			RepoID:       repoID,
 			TargetBranch: targetBranch,
+			Waiting:      waiting,
 			Limit:        int32(max),
 		})
 		if err != nil {
@@ -111,6 +113,41 @@ func (s *Service) SaveBatch(ctx context.Context, b *pg.Batch, removeEntries ...i
 		}
 		return saveBatch(ctx, q, b)
 	})
+}
+
+// SaveBatchRequeuing persists the batch row and, in the same transaction,
+// hands requeue back to the queue (queued, outside any batch, keeping their
+// FIFO position) and deletes removeEntries.
+func (s *Service) SaveBatchRequeuing(ctx context.Context, b *pg.Batch, requeue []int64, removeEntries ...int64) error {
+	if len(requeue) == 0 {
+		return s.SaveBatch(ctx, b, removeEntries...)
+	}
+	return s.withTx(ctx, func(q *pg.Queries) error {
+		if len(removeEntries) > 0 {
+			if err := q.DeleteEntriesByIDs(ctx, removeEntries); err != nil {
+				return fmt.Errorf("delete entries: %w", err)
+			}
+		}
+		if err := q.RequeueEntries(ctx, requeue); err != nil {
+			return fmt.Errorf("requeue entries: %w", err)
+		}
+		if err := q.ClearCheckStatuses(ctx, requeue); err != nil {
+			return fmt.Errorf("clear check statuses: %w", err)
+		}
+		return saveBatch(ctx, q, b)
+	})
+}
+
+// QueuedCounts reports how many entries of a (repo, branch) queue wait outside
+// any batch, split by whether they may land (Ready) or are only queued to be
+// tested early (Waiting).
+func (s *Service) QueuedCounts(ctx context.Context, repoID int64, targetBranch string) (pg.CountQueuedRow, error) {
+	return s.queries().CountQueued(ctx, pg.CountQueuedParams{RepoID: repoID, TargetBranch: targetBranch})
+}
+
+// SetWaiting marks whether an entry is queued only to be tested early.
+func (s *Service) SetWaiting(ctx context.Context, entryID int64, waiting bool) error {
+	return s.queries().SetEntryWaiting(ctx, pg.SetEntryWaitingParams{ID: entryID, Waiting: waiting})
 }
 
 func saveBatch(ctx context.Context, q *pg.Queries, b *pg.Batch) error {

@@ -69,6 +69,16 @@ func (s *Service) withTx(ctx context.Context, fn func(q *pg.Queries) error) erro
 // If the PR is already queued, it is a no-op and returns the existing position.
 // Runs in a transaction so the insert and position count are atomic.
 func (s *Service) Enqueue(ctx context.Context, repoID, prNumber int64, prHeadSHA, targetBranch string) (*EnqueueResult, error) {
+	return s.enqueue(ctx, repoID, prNumber, prHeadSHA, targetBranch, false)
+}
+
+// EnqueueWaiting is Enqueue for a PR that may not land yet: it is only tested
+// early, in batches of its own, until SetWaiting clears the mark.
+func (s *Service) EnqueueWaiting(ctx context.Context, repoID, prNumber int64, prHeadSHA, targetBranch string) (*EnqueueResult, error) {
+	return s.enqueue(ctx, repoID, prNumber, prHeadSHA, targetBranch, true)
+}
+
+func (s *Service) enqueue(ctx context.Context, repoID, prNumber int64, prHeadSHA, targetBranch string, waiting bool) (*EnqueueResult, error) {
 	var result EnqueueResult
 
 	err := s.withTx(ctx, func(q *pg.Queries) error {
@@ -77,6 +87,7 @@ func (s *Service) Enqueue(ctx context.Context, repoID, prNumber int64, prHeadSHA
 			PrNumber:     prNumber,
 			PrHeadSha:    prHeadSHA,
 			TargetBranch: targetBranch,
+			Waiting:      waiting,
 		})
 		if insertErr != nil {
 			// ON CONFLICT DO NOTHING → pgx returns no rows.

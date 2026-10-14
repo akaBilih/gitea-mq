@@ -76,6 +76,7 @@ variables.
 | `GITEA_MQ_LABEL_PREFIX` | no | `mq/` | Prefix of the queue state labels set on PRs (see [Queue labels](#queue-labels)); set to `none` to disable |
 | `GITEA_MQ_BATCH_MAX` | no | `1` | Max PRs tested together as one batch. `1` = batching off (legacy behaviour). `0` = everything currently queued |
 | `GITEA_MQ_BISECT_MAX_STEPS` | no | `0` | Cap on CI builds spent bisecting one batch. `0` = unlimited |
+| `GITEA_MQ_TEST_WHILE_BLOCKED` | no | `false` | Test PRs blocked by dependencies that cannot move their target branch while they wait, so they land without CI once those close (see Issue dependencies). Requires batching |
 | `GITEA_MQ_REFRESH_INTERVAL` | no | `10s` | Dashboard auto-refresh interval |
 | `GITEA_MQ_DISCOVERY_INTERVAL` | no | `5m` | How often to re-scan Gitea topics and GitHub installations |
 | `GITEA_MQ_CACHE_DIR` | no | `$XDG_CACHE_HOME/gitea-mq` | Directory for persistent bare git clones used for merge operations; unused repos are removed after 30 days |
@@ -124,6 +125,45 @@ fast-forwarding the target, which bypasses that check. gitea-mq enforces it:
 
 The token must be able to read every repository a dependency may point to, as
 Gitea omits unreadable ones.
+
+### Testing blocked PRs meanwhile
+
+When many PRs wait on the same dependency, they all queue the moment it closes
+and wait for CI one batch after another. A typical case is a release freeze:
+every PR into `develop` depends on the `develop` → `master` promotion PR until
+it merges. With `GITEA_MQ_TEST_WHILE_BLOCKED=true` (batching only) they are
+tested while they wait, and land the poll after the dependency closes, without
+another CI run:
+
+- A PR whose open dependencies cannot move its target branch is queued anyway,
+  marked as waiting (`Blocked by open dependency #N; testing it meanwhile`).
+  Only a pull request of the same repository merging into the target branch, or
+  into the PR's own head branch, can; such a dependency keeps the PR out of the
+  queue as before. Issues and pull requests into other branches or repositories
+  do not.
+- Waiting PRs are batched among themselves, and only when nothing that may land
+  is queued for that branch.
+- A batch that passes while its members are still blocked is **held**: it keeps
+  the branch's batch slot and its tested SHA. Once every member's dependencies
+  are closed it lands by fast-forward; the fast-forward only succeeds if the
+  target has not moved, so what lands is exactly what CI tested.
+- A held batch gives way at once: it is dissolved (members go back to the
+  queue, in place) when a PR that may land is queued, when the target branch
+  moves (they are tested again on the new tip), or when a PR newly blocked on a
+  dependency joins the queue and the batch has room (they are tested together,
+  so they all land at once).
+- Bisecting such a batch cannot land a passing half to build the next one on,
+  so the half goes back to the queue and the last passing half is held. A half
+  sent back is not re-batched with it until something changes, so a pair of
+  PRs that only fail together cannot loop; one lands first and the other is
+  tested on top of it.
+- A batch member that gains such a dependency while testing goes back to the
+  queue as waiting instead of leaving it with a comment.
+
+Repos with waiting PRs are polled every `GITEA_MQ_POLL_INTERVAL`, which is how
+the closing of a dependency (no webhook reports it) is noticed. Switching the
+option off dissolves held batches at startup; waiting PRs then leave the queue
+as blocked PRs did before.
 
 ## Repo selection
 

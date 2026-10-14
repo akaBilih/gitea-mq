@@ -56,6 +56,11 @@ func Handler(secret string, repos RepoLookup, queueSvc *queue.Service) http.Hand
 
 		sig := r.Header.Get("X-Gitea-Signature")
 		if !ValidateSignature(body, sig, secret) {
+			// Gitea only shows the 401 in the hook's delivery history: without
+			// this line a secret that drifted from GITEA_MQ_WEBHOOK_SECRET
+			// silently leaves idle repos to the idle poll.
+			slog.Warn("rejected gitea webhook: signature mismatch, the hook's secret must equal GITEA_MQ_WEBHOOK_SECRET",
+				"event", r.Header.Get("X-Gitea-Event"), "delivery", r.Header.Get("X-Gitea-Delivery"), "signed", sig != "")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}

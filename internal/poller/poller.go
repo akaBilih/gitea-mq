@@ -5,6 +5,7 @@ package poller
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"time"
@@ -776,26 +777,27 @@ func notifyTickDone(deps *Deps) {
 func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) {
 	slog.Info("poller started", "owner", deps.Owner, "repo", deps.Repo, "interval", interval, "idle_interval", idleInterval, "idle_gating", deps.IdleGating)
 
-	// periodic ticks log paused/issue diagnostics; the initial and
-	// webhook-triggered polls stay quiet to avoid log noise on bursts.
-	doPoll := func(periodic bool) {
+	// periodic ticks log poll issues; the initial and webhook-triggered polls
+	// stay quiet to avoid log noise on bursts. A paused poll is logged on every
+	// path: it is the only trace of a reconcile that did not happen.
+	// Reports whether the forge answered.
+	doPoll := func(periodic bool) bool {
 		result, err := PollOnce(ctx, deps)
 		if err != nil {
 			slog.Error("poll error", "owner", deps.Owner, "repo", deps.Repo, "error", err)
-			return
-		}
-		if !periodic {
-			return
+			return false
 		}
 		if result.Paused {
-			slog.Warn("forge unavailable, pausing", "owner", deps.Owner, "repo", deps.Repo)
+			slog.Warn("forge unavailable, pausing", "owner", deps.Owner, "repo", deps.Repo, "error", errors.Join(result.Errors...))
+			return false
 		}
-		for _, e := range result.Errors {
-			slog.Warn("poll issue", "owner", deps.Owner, "repo", deps.Repo, "error", e)
+		if periodic {
+			for _, e := range result.Errors {
+				slog.Warn("poll issue", "owner", deps.Owner, "repo", deps.Repo, "error", e)
+			}
 		}
+		return true
 	}
-
-	doPoll(false)
 
 	// Idle repos reconcile at idleInterval instead of every tick, keeping
 	// periodic forge traffic proportional to repos with live queue work.
@@ -808,7 +810,21 @@ func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) 
 		defer ticker.Stop()
 		ticks = ticker.C
 	}
-	lastFull := time.Now()
+
+	// lastFull is when the forge last answered a reconcile. A failed one
+	// leaves it zero so the next tick retries: counting it as done would
+	// leave an idle repo unreconciled for a whole idleInterval, and the
+	// webhook that triggered it is not delivered again.
+	var lastFull time.Time
+	reconcile := func(periodic bool) {
+		if doPoll(periodic) {
+			lastFull = time.Now()
+		} else {
+			lastFull = time.Time{}
+		}
+	}
+
+	reconcile(false)
 
 	for {
 		select {
@@ -816,14 +832,12 @@ func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) 
 			slog.Info("poller stopped", "owner", deps.Owner, "repo", deps.Repo)
 			return
 		case <-deps.Trigger:
-			doPoll(false)
-			lastFull = time.Now()
+			reconcile(false)
 			notifyTickDone(deps)
 		case <-ticks:
 			skipIdle := deps.IdleGating && !hasActiveWork(ctx, deps) && time.Since(lastFull) < idleInterval
 			if !skipIdle {
-				doPoll(true)
-				lastFull = time.Now()
+				reconcile(true)
 			}
 			notifyTickDone(deps)
 		}

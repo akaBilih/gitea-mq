@@ -71,8 +71,12 @@ func newReleaseRig(t *testing.T, prs ...forge.PR) *releaseRig {
 		return map[string]forge.Check{"ci": {State: pg.CheckStateSuccess}}, nil
 	}
 	var tip string
-	mock.CreateMergeBranchFn = func(_ context.Context, _, _, _, head, _ string) (string, bool, error) {
-		tip = fmt.Sprintf("m(%s,%s)", r.develop, head)
+	mock.CreateMergeBranchFn = func(_ context.Context, _, _, base, head, _ string) (string, bool, error) {
+		from := r.develop
+		if base != "develop" {
+			from = base // a layer on a passed SHA
+		}
+		tip = fmt.Sprintf("m(%s,%s)", from, head)
 		return tip, false, nil
 	}
 	mock.MergeIntoFn = func(_ context.Context, _, _, _, head string) (string, bool, error) {

@@ -56,8 +56,9 @@ type Engine struct {
 	// TestWhileBlocked tests the entries the poller queued as waiting (open
 	// dependencies that cannot move the target) in batches of their own,
 	// whenever nothing that may land is queued. A batch that passes while its
-	// members are still blocked is held, and lands by fast-forward once they
-	// close, without another CI run.
+	// members are still blocked is held; waiting PRs queued later are tested
+	// as layers on top of it, and the whole stack lands by fast-forward once
+	// their dependencies close, without another CI run.
 	TestWhileBlocked bool
 
 	// MergedPoll controls ensureMergedOrClose. Defaults: 200ms × 50 = 10s.
@@ -174,7 +175,14 @@ func (e *Engine) Build(ctx context.Context, b *pg.Batch) error {
 		b.BranchName = pgtype.Text{String: BranchName(b.ID), Valid: true}
 	}
 	branch := b.BranchName.String
-	_ = e.Forge.DeleteBranch(ctx, e.Owner, e.Repo, branch)
+	// A layer is built on what the batch already passed, which only the batch
+	// branch keeps reachable: the branch is then replaced, never deleted.
+	base, layered := b.TargetBranch, len(b.HeldIds) > 0
+	if layered {
+		base = b.HeldSha.String
+	} else {
+		_ = e.Forge.DeleteBranch(ctx, e.Owner, e.Repo, branch)
+	}
 
 	entries, err := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
 	if err != nil {
@@ -185,9 +193,15 @@ func (e *Engine) Build(ctx context.Context, b *pg.Batch) error {
 	for i := range entries {
 		heads[i] = entries[i].PrHeadSha
 	}
-	tip, steps := e.headIfUpToDate(ctx, b.TargetBranch, heads)
+	var (
+		tip   string
+		steps []forge.MergeStep
+	)
+	if !layered {
+		tip, steps = e.headIfUpToDate(ctx, base, heads)
+	}
 	if tip == "" {
-		tip, steps, err = e.stack(ctx, b.TargetBranch, heads, branch)
+		tip, steps, err = e.stack(ctx, base, heads, branch)
 	}
 	if err != nil {
 		// Whole-operation failure (clone/push). Row stays forming;
@@ -206,6 +220,8 @@ func (e *Engine) Build(ctx context.Context, b *pg.Batch) error {
 			msg := "Merge conflict with target branch"
 			if prev != 0 {
 				msg = fmt.Sprintf("Merge conflict in batch (after #%d)", prev)
+			} else if layered {
+				msg = fmt.Sprintf("Merge conflict with the PRs batch #%d already passed", b.ID)
 			}
 			e.eject(ctx, b, ent, pg.CheckStateFailure, msg,
 				"❌ Removed from merge queue: "+msg+". Please rebase and re-schedule automerge.")
@@ -299,6 +315,12 @@ func (e *Engine) HandlePass(ctx context.Context, b *pg.Batch) error {
 // land fast-forwards the target to the tested SHA of a testing or held batch,
 // unless open dependencies keep members back.
 func (e *Engine) land(ctx context.Context, b *pg.Batch) error {
+	// The tested tree holds the layers already passed as well as the one just
+	// tested; from here on they are one set, landed or held together.
+	if len(b.HeldIds) > 0 {
+		b.CurrentIds = slices.Concat(b.HeldIds, b.CurrentIds)
+		b.HeldIds, b.HeldSha = nil, pgtype.Text{}
+	}
 	entries, err := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
 	if err != nil {
 		return err
@@ -439,6 +461,12 @@ func (e *Engine) OnMemberRemoved(ctx context.Context, targetBranch string, batch
 		return nil
 	}
 	id := entryID
+	if slices.Contains(b.HeldIds, id) {
+		// What the batch passed no longer exists without it: start over.
+		b.HeldIds = slices.DeleteFunc(b.HeldIds, func(v int64) bool { return v == id })
+		b.EjectedIds = append(b.EjectedIds, id)
+		return e.dissolve(ctx, b, "a PR tested with it left the queue")
+	}
 	wasCurrent := slices.Contains(b.CurrentIds, id)
 	b.CurrentIds = slices.DeleteFunc(b.CurrentIds, func(v int64) bool { return v == id })
 	b.Pending = loadPending(b.Pending).drop(id).bytes()
@@ -477,8 +505,9 @@ func (e *Engine) LiveBranchNames(ctx context.Context) ([]string, error) {
 // ReconcileLive resumes batches found at startup: forming → rebuild;
 // testing → re-sync each current entry's merge_branch_* from the batch row
 // so a crash between Build's SaveBatch and SetMergeBranch cannot strand the
-// batch with no entry routing the current SHA; held while testing blocked PRs
-// is switched off → dissolved, since nothing would ever review it.
+// batch with no entry routing the current SHA; held, or layered on held PRs,
+// while testing blocked PRs is switched off → dissolved, since nothing would
+// review it any more.
 func (e *Engine) ReconcileLive(ctx context.Context) error {
 	bs, err := e.Queue.ListLiveBatches(ctx, e.RepoID)
 	if err != nil {
@@ -487,22 +516,20 @@ func (e *Engine) ReconcileLive(ctx context.Context) error {
 	for i := range bs {
 		b := &bs[i]
 		unlock := e.lock(b.TargetBranch)
-		switch b.State {
-		case pg.BatchStateForming:
+		switch {
+		case !e.TestsWhileBlocked() && (b.State == pg.BatchStateHeld || len(b.HeldIds) > 0):
+			logutil.WarnIfErr(e.dissolve(ctx, b, "testing blocked PRs is switched off"),
+				"dissolve held batch failed", "batch", b.ID)
+		case b.State == pg.BatchStateForming:
 			slog.Info("batch reconcile: rebuilding forming batch", "batch", b.ID)
 			if err := e.Build(ctx, b); err != nil {
 				slog.Warn("batch reconcile build failed", "batch", b.ID, "err", err)
 			}
-		case pg.BatchStateTesting:
+		case b.State == pg.BatchStateTesting:
 			entries, _ := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
 			for _, ent := range entries {
 				logutil.WarnIfErr(e.Queue.SetMergeBranch(ctx, e.RepoID, ent.PrNumber,
 					b.BranchName.String, b.BranchSha.String), "set merge branch failed", "pr", ent.PrNumber)
-			}
-		case pg.BatchStateHeld:
-			if !e.TestsWhileBlocked() {
-				logutil.WarnIfErr(e.dissolve(ctx, b, "testing blocked PRs is switched off"),
-					"dissolve held batch failed", "batch", b.ID)
 			}
 		}
 		unlock()
@@ -576,6 +603,13 @@ func popNext(b *pg.Batch) bool {
 		b.State = pg.BatchStateForming
 		return true
 	}
+	if len(b.HeldIds) > 0 {
+		// The last slice of a layer is gone; what passed before stays held.
+		b.State = pg.BatchStateHeld
+		b.BranchSha = b.HeldSha
+		b.CurrentIds = nil
+		return false
+	}
 	// Root failed but every member eventually landed and nobody was ejected →
 	// flaky CI or a cross-PR interaction across halves.
 	b.Flaky = len(b.EjectedIds) == 0 && b.Builds > 1 &&
@@ -590,6 +624,10 @@ func popNext(b *pg.Batch) bool {
 func (e *Engine) finish(ctx context.Context, b *pg.Batch, build bool) error {
 	if build {
 		return e.Build(ctx, b)
+	}
+	if b.State == pg.BatchStateHeld {
+		slog.Info("batch held until its dependencies close", "batch", b.ID, "sha", b.BranchSha.String, "held", len(b.HeldIds))
+		return nil
 	}
 	logutil.WarnIfErr(e.Forge.DeleteBranch(ctx, e.Owner, e.Repo, b.BranchName.String), "delete batch branch failed", "branch", b.BranchName.String)
 	slog.Info("batch done", "batch", b.ID, "landed", len(b.LandedIds),
@@ -664,6 +702,9 @@ const (
 	BucketPending MemberBucket = "pending"
 	BucketLanded  MemberBucket = "landed"
 	BucketEjected MemberBucket = "ejected"
+	// BucketHeld members passed but wait for dependencies; later layers are
+	// tested on top of them.
+	BucketHeld MemberBucket = "held"
 )
 
 // Bucket reports which slice of b the entry id is in.
@@ -671,6 +712,8 @@ func Bucket(b *pg.Batch, id int64) MemberBucket {
 	switch {
 	case slices.Contains(b.CurrentIds, id):
 		return BucketCurrent
+	case slices.Contains(b.HeldIds, id):
+		return BucketHeld
 	case slices.Contains(b.LandedIds, id):
 		return BucketLanded
 	case slices.Contains(b.EjectedIds, id):
@@ -695,10 +738,10 @@ func ids(entries []pg.QueueEntry) []int64 {
 
 // holdBlocked keeps members with an open dependency from landing. Those the
 // poller queued as waiting go back to the queue; the rest leave it with their
-// merge intent kept, and the poller re-enqueues them once it closes. A batch
-// whose members all wait is held instead or, mid-bisection, handed back so the
-// pending halves still get tested. All lookups happen before any change, so a
-// forge error leaves the batch untouched. Reports whether it took b over.
+// merge intent kept, and the poller re-enqueues them once it closes. When every
+// member waits, nothing leaves: the passed tree is held, and any pending half
+// is tested on top of it. All lookups happen before any change, so a forge
+// error leaves the batch untouched. Reports whether it took b over.
 func (e *Engine) holdBlocked(ctx context.Context, b *pg.Batch, entries []pg.QueueEntry) (bool, error) {
 	blocked := make(map[int64][]forge.Dependency)
 	for i := range entries {
@@ -721,15 +764,17 @@ func (e *Engine) holdBlocked(ctx context.Context, b *pg.Batch, entries []pg.Queu
 		}
 	}
 	if len(waiting) == len(entries) {
-		if len(loadPending(b.Pending)) == 0 {
-			return true, e.hold(ctx, b, entries, blocked)
+		// Nobody may land yet, so what passed stays in the tree as if it had
+		// landed: pending halves and later layers are built on top of it.
+		b.HeldIds, b.HeldSha, b.CurrentIds = b.CurrentIds, b.BranchSha, nil
+		for i := range entries {
+			ent := &entries[i]
+			logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
+				State: pg.CheckStatePending, Description: forge.HeldStatus(b.ID, blocked[ent.ID], e.Owner, e.Repo), TargetURL: e.prURL(ent.PrNumber),
+			}), "set mq status failed", "pr", ent.PrNumber)
 		}
-		// Nothing lands to build the pending halves on, so this one goes back
-		// to the queue untouched; a later batch tests it with the others.
-		e.setWaitingStatuses(ctx, entries, blocked)
-		b.CurrentIds = nil
-		slog.Info("batch half passed while blocked; requeued", "batch", b.ID, "requeued", len(waiting))
-		return true, e.next(ctx, b, waiting...)
+		slog.Info("batch passed while blocked; holding it", "batch", b.ID, "sha", b.HeldSha.String, "held", len(b.HeldIds))
+		return true, e.next(ctx, b)
 	}
 
 	for i := range entries {
@@ -775,33 +820,16 @@ func (e *Engine) setWaitingStatuses(ctx context.Context, entries []pg.QueueEntry
 	}
 }
 
-// hold parks a batch that passed while every member still waits on
-// dependencies that cannot move the target. Its SHA stays good for as long as
-// the target does not move, so review lands it once they close.
-func (e *Engine) hold(ctx context.Context, b *pg.Batch, entries []pg.QueueEntry, blocked map[int64][]forge.Dependency) error {
-	b.State = pg.BatchStateHeld
-	if err := e.Queue.SaveBatch(ctx, b, b.EjectedIds...); err != nil {
-		return err
-	}
-	for i := range entries {
-		ent := &entries[i]
-		logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
-			State: pg.CheckStatePending, Description: forge.HeldStatus(b.ID, blocked[ent.ID], e.Owner, e.Repo), TargetURL: e.prURL(ent.PrNumber),
-		}), "set mq status failed", "pr", ent.PrNumber)
-	}
-	slog.Info("batch passed; held until its dependencies close", "batch", b.ID, "sha", b.BranchSha.String, "members", len(entries))
-	return nil
-}
-
 // review re-decides a held batch, and a testing one made only of waiting
 // entries, against the queue as it is now. Whatever may land goes first, so
-// such a batch never delays a PR that could merge. Reports whether it
+// such a batch never delays a PR that could merge; blocked PRs queued while it
+// is held are tested as a new layer on top of it. Reports whether it
 // dissolved b.
 func (e *Engine) review(ctx context.Context, b *pg.Batch) (bool, error) {
 	if b.State == pg.BatchStateHeld && !e.TestsWhileBlocked() {
 		return true, e.dissolve(ctx, b, "testing blocked PRs is switched off")
 	}
-	entries, err := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
+	entries, err := e.Queue.GetEntriesByIDs(ctx, slices.Concat(b.HeldIds, b.CurrentIds))
 	if err != nil || len(entries) == 0 {
 		return false, err
 	}
@@ -818,9 +846,7 @@ func (e *Engine) review(ctx context.Context, b *pg.Batch) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	// Only a PR queued after b formed counts: re-forming around the members
-	// b already split off could repeat the same failing combination forever.
-	var newcomers int
+	var waiting int
 	for _, q := range queued {
 		if q.State != pg.EntryStateQueued {
 			continue
@@ -828,15 +854,10 @@ func (e *Engine) review(ctx context.Context, b *pg.Batch) (bool, error) {
 		if !q.Waiting {
 			return true, e.dissolve(ctx, b, fmt.Sprintf("PR #%d may land first", q.PrNumber))
 		}
-		if q.EnqueuedAt.Time.After(b.CreatedAt.Time) {
-			newcomers++
-		}
+		waiting++
 	}
 	if b.State != pg.BatchStateHeld {
 		return false, nil
-	}
-	if newcomers > 0 && (e.BatchMax <= 0 || len(b.CurrentIds) < e.BatchMax) {
-		return true, e.dissolve(ctx, b, "testing it with newly blocked PRs")
 	}
 	up, err := e.Forge.IsUpToDate(ctx, e.Owner, e.Repo, b.TargetBranch, b.BranchSha.String)
 	if err != nil {
@@ -845,17 +866,44 @@ func (e *Engine) review(ctx context.Context, b *pg.Batch) (bool, error) {
 	if !up {
 		return true, e.dissolve(ctx, b, b.TargetBranch+" moved")
 	}
+	if waiting > 0 {
+		return false, e.layer(ctx, b)
+	}
 	return false, nil
+}
+
+// layer takes up to BatchMax waiting entries into b and tests them on top of
+// what b already passed. A failing layer is bisected on its own: what b holds
+// is never retested, and every layer that passes joins it, so all of them land
+// in one fast-forward once their dependencies close.
+func (e *Engine) layer(ctx context.Context, b *pg.Batch) error {
+	if ok, err := e.Queue.ExtendBatch(ctx, b, e.BatchMax); err != nil || !ok {
+		return err
+	}
+	slog.Info("batch layer formed", "batch", b.ID, "held", len(b.HeldIds), "layer", len(b.CurrentIds))
+	if err := e.Build(ctx, b); err != nil || b.State != pg.BatchStateTesting {
+		return err
+	}
+	entries, _ := e.Queue.GetEntriesByIDs(ctx, b.CurrentIds)
+	desc := fmt.Sprintf("Testing on top of batch #%d (%d PRs passed)", b.ID, len(b.HeldIds))
+	for i := range entries {
+		ent := &entries[i]
+		logutil.WarnIfErr(e.Forge.SetMQStatus(ctx, e.Owner, e.Repo, ent.PrHeadSha, forge.MQStatus{
+			State: pg.CheckStatePending, Description: desc, TargetURL: e.prURL(ent.PrNumber),
+		}), "set mq status failed", "pr", ent.PrNumber)
+	}
+	return nil
 }
 
 // dissolve hands every member still in play back to the queue, where each
 // keeps its place, and cancels b; the next FormAndBuild forms a fresh batch.
 func (e *Engine) dissolve(ctx context.Context, b *pg.Batch, reason string) error {
-	back := slices.Clone(b.CurrentIds)
+	back := slices.Concat(b.HeldIds, b.CurrentIds)
 	for _, s := range loadPending(b.Pending) {
 		back = append(back, s...)
 	}
 	entries, _ := e.Queue.GetEntriesByIDs(ctx, back)
+	b.HeldIds, b.HeldSha = nil, pgtype.Text{}
 	b.CurrentIds, b.Pending = nil, nil
 	b.State = pg.BatchStateCancelled
 	if err := e.Queue.SaveBatchRequeuing(ctx, b, back, b.EjectedIds...); err != nil {

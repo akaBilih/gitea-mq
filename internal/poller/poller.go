@@ -74,6 +74,10 @@ type Deps struct {
 	hintedSHAs map[string]bool
 	// blockedStatus: head SHA -> last "blocked" description posted.
 	blockedStatus map[string]string
+	// blockedPRs holds the PRs this poll kept out of the queue for an open
+	// dependency. lastBlocked is the previous poll's set, kept for a PR whose
+	// dependencies could not be read this time so its label does not flap.
+	blockedPRs, lastBlocked map[int64]bool
 	// guard answers which dependencies can move a branch; fresh per poll.
 	guard *forge.BranchGuard
 }
@@ -177,6 +181,7 @@ func prCheckResult(ctx context.Context, deps *Deps, pr *forge.PR, targetBranch s
 func PollOnce(ctx context.Context, deps *Deps) (*PollResult, error) {
 	result := &PollResult{}
 	deps.guard = nil // a dependency may have been retargeted since the last poll
+	deps.lastBlocked, deps.blockedPRs = deps.blockedPRs, map[int64]bool{}
 
 	openPRs, err := deps.Forge.ListOpenPRs(ctx, deps.Owner, deps.Repo)
 	if err != nil {
@@ -328,6 +333,7 @@ func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR
 	res, err := prCheckResult(ctx, deps, pr, targetBranch)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("check CI status for PR #%d: %w", pr.Number, err))
+		deps.keepBlocked(pr.Number)
 		return
 	}
 	if res != monitor.CheckSuccess {
@@ -339,6 +345,7 @@ func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR
 	blockers, err := forge.OpenDependencies(ctx, deps.Forge, deps.Owner, deps.Repo, pr.Number)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", pr.Number, err))
+		deps.keepBlocked(pr.Number)
 		return
 	}
 	enqueue := deps.Queue.Enqueue
@@ -346,6 +353,7 @@ func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR
 		testable, err := deps.testableWhileBlocked(ctx, blockers, targetBranch, pr.HeadBranch)
 		if err != nil {
 			result.Errors = append(result.Errors, fmt.Errorf("check dependencies of PR #%d: %w", pr.Number, err))
+			deps.keepBlocked(pr.Number)
 			return
 		}
 		if !testable {
@@ -902,9 +910,26 @@ func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) 
 	}
 }
 
-// markBlocked posts the blocked status once per head SHA and description.
+// markBlocked posts the blocked status once per head SHA and description, and
+// records for this poll's state labels that the PR is kept out of the queue.
 func markBlocked(ctx context.Context, deps *Deps, number int64, sha string, blockers []forge.Dependency) {
+	deps.setBlocked(number)
 	markStatus(ctx, deps, number, sha, forge.BlockedStatus(blockers, deps.Owner, deps.Repo))
+}
+
+func (d *Deps) setBlocked(number int64) {
+	if d.blockedPRs == nil {
+		d.blockedPRs = map[int64]bool{}
+	}
+	d.blockedPRs[number] = true
+}
+
+// keepBlocked carries a PR's blocked mark over from the last poll when this one
+// could not decide, so a transient forge error does not flip its label.
+func (d *Deps) keepBlocked(number int64) {
+	if d.lastBlocked[number] {
+		d.setBlocked(number)
+	}
 }
 
 // markStatus posts a pending status about dependencies once per head SHA and

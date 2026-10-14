@@ -37,7 +37,7 @@
                     <td>{{inc $i}}</td>
                     <td><a href="{{$.BasePath}}/repo/{{$.Forge}}/{{$.Owner}}/{{$.Name}}/pr/{{$e.PrNumber}}">PR #{{$e.PrNumber}}</a></td>
                     <td>{{$e.TargetBranch}}</td>
-                    <td><span class="state state-{{$e.State}}">{{$e.State}}</span>{{if $e.BatchBucket}} <span class="bucket bucket-{{$e.BatchBucket}}">{{$e.BatchBucket}}</span>{{end}}{{if $e.Waiting}} <span class="bucket bucket-waiting">blocked</span>{{end}}</td>
+                    <td><span class="state state-{{$e.State}}">{{$e.State}}</span>{{if $e.BatchID}} <span class="bucket bucket-pending">batch #{{$e.BatchID}}</span>{{end}}</td>
                 </tr>
                 {{end}}
             </tbody>

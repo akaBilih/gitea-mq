@@ -17,6 +17,9 @@ a:hover { text-decoration: underline; }
 .state-success { background: #dafbe1; color: #116329; }
 .state-failed { background: #ffebe9; color: #cf222e; }
 .state-cancelled { background: #eaeef2; color: #57606a; }
+.state-queued-blocked { background: #fbefff; color: #8250df; }
+.state-held { background: #dafbe1; color: #8250df; }
+.state-merging { background: #dafbe1; color: #116329; }
 .bucket { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.85em; margin-left: 4px; }
 .bucket-current { background: #fff8c5; color: #9a6700; }
 .bucket-pending { background: #eaeef2; color: #57606a; }

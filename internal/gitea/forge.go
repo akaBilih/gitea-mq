@@ -91,8 +91,9 @@ func (f *giteaForge) BranchHTMLURL(owner, name, branch string) string {
 	return fmt.Sprintf("%s/%s/%s/src/branch/%s", f.baseURL, owner, name, branch)
 }
 
-func toForgePR(pr *PR, autoMerge bool) forge.PR {
+func toForgePR(pr *PR, autoMerge bool, headUpdatedAt time.Time) forge.PR {
 	out := forge.PR{
+		HeadUpdatedAt:    headUpdatedAt,
 		Number:           pr.Index,
 		Title:            pr.Title,
 		State:            pr.State,
@@ -132,7 +133,7 @@ func (f *giteaForge) ListOpenPRs(ctx context.Context, owner, name string) ([]for
 		if err != nil {
 			return nil, fmt.Errorf("get timeline for PR #%d: %w", prs[i].Index, err)
 		}
-		out = append(out, toForgePR(&prs[i], HasAutomergeScheduled(timeline)))
+		out = append(out, toForgePR(&prs[i], HasAutomergeScheduled(timeline), HeadUpdatedAt(&prs[i], timeline)))
 	}
 	return out, nil
 }
@@ -146,7 +147,7 @@ func (f *giteaForge) GetPR(ctx context.Context, owner, name string, number int64
 	if err != nil {
 		return nil, err
 	}
-	fp := toForgePR(pr, HasAutomergeScheduled(timeline))
+	fp := toForgePR(pr, HasAutomergeScheduled(timeline), HeadUpdatedAt(pr, timeline))
 	return &fp, nil
 }
 

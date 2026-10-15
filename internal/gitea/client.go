@@ -18,6 +18,7 @@ type PR struct {
 	State     string     `json:"state"` // "open", "closed"
 	HasMerged bool       `json:"merged"`
 	Merged    *time.Time `json:"merged_at"`
+	Created   *time.Time `json:"created_at"`
 	User      *User      `json:"user"`
 	Head      *PRRef     `json:"head"`
 	Base      *PRRef     `json:"base"`

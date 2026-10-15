@@ -333,8 +333,18 @@ func enqueueAutoMergePRs(ctx context.Context, deps *Deps, result *PollResult, op
 	}
 }
 
+// HeadSettle is how long after its head changes a PR is left alone before its
+// own CI is trusted. CI registers its runs for a new head a few seconds after
+// the push, and until then the head may carry only checks the push event
+// skipped: a required pattern like "test (*)" matches them, and a skipped
+// check counts as passed, so the PR looked green before its CI had started.
+const HeadSettle = time.Minute
+
 // enqueuePR adds a PR to the queue for targetBranch once its own CI is green.
 func enqueuePR(ctx context.Context, deps *Deps, result *PollResult, pr *forge.PR, targetBranch, source string) {
+	if !pr.HeadUpdatedAt.IsZero() && deps.now().Sub(pr.HeadUpdatedAt) < HeadSettle {
+		return
+	}
 	res, err := prCheckResult(ctx, deps, pr, targetBranch)
 	if err != nil {
 		result.Errors = append(result.Errors, fmt.Errorf("check CI status for PR #%d: %w", pr.Number, err))

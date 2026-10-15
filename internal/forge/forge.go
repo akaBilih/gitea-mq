@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"slices"
 	"strings"
+	"time"
 
 	"github.com/Mic92/gitea-mq/internal/store/pg"
 )
@@ -126,6 +127,9 @@ type PR struct {
 	HTMLURL          string
 	AutoMergeEnabled bool
 	Labels           []string
+	// HeadUpdatedAt is when the head last changed (a push, or the PR opening);
+	// zero when the forge does not say.
+	HeadUpdatedAt time.Time
 }
 
 // HasLabel reports whether the PR carries the given label (case-insensitive,

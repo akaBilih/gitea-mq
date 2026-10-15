@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/Mic92/gitea-mq/internal/forge"
 	"github.com/Mic92/gitea-mq/internal/gitea"
@@ -111,5 +112,21 @@ func TestForge_CanPush_ReadsGiteaVerdict(t *testing.T) {
 	}
 	if _, err := forge.CanPush(ctx, f, "org", "app", "master"); err == nil {
 		t.Error("CanPush must report a failed lookup")
+	}
+}
+
+func TestHeadUpdatedAt_LatestPushOrOpening(t *testing.T) {
+	opened := time.Date(2026, 10, 14, 16, 0, 0, 0, time.UTC)
+	pr := &gitea.PR{Created: &opened}
+	if got := gitea.HeadUpdatedAt(pr, nil); !got.Equal(opened) {
+		t.Errorf("no pushes: got %v, want the opening %v", got, opened)
+	}
+	timeline := []gitea.TimelineComment{
+		{Type: "pull_push", CreatedAt: opened.Add(time.Hour)},
+		{Type: "label", CreatedAt: opened.Add(3 * time.Hour)},
+		{Type: "pull_push", CreatedAt: opened.Add(2 * time.Hour)},
+	}
+	if got := gitea.HeadUpdatedAt(pr, timeline); !got.Equal(opened.Add(2 * time.Hour)) {
+		t.Errorf("got %v, want the latest push", got)
 	}
 }

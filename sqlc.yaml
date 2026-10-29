@@ -2,7 +2,9 @@ version: "2"
 sql:
   - engine: "postgresql"
     queries: "internal/store/pg/query.sql"
-    schema: "internal/store/pg/migrations"
+    schema:
+      - "internal/store/pg/migrations"
+      - "internal/store/pg/migrations_fork"
     gen:
       go:
         out: "internal/store/pg"

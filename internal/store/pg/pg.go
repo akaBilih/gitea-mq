@@ -32,6 +32,8 @@ func Connect(ctx context.Context, connString string) (*pgxpool.Pool, error) {
 		return nil, fmt.Errorf("failed to set dialect: %w", err)
 	} else if err = goose.Up(db, "migrations"); err != nil {
 		return nil, fmt.Errorf("failed to migrate db: %w", err)
+	} else if err = migrateFork(ctx, db); err != nil {
+		return nil, err
 	}
 
 	return pool, nil

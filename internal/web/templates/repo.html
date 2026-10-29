@@ -6,9 +6,13 @@
     <meta http-equiv="refresh" content="{{.RefreshInterval}}">
     <title>{{.Owner}}/{{.Name}} – gitea-mq</title>
     <link rel="stylesheet" href="{{.BasePath}}/static/style.css">
+    {{template "theme-head" .BasePath}}
 </head>
 <body>
-    <nav class="breadcrumb"><a href="{{.BasePath}}/">gitea-mq</a> › {{.Forge}}:{{.Owner}}/{{.Name}}</nav>
+    <div class="topbar">
+        <nav class="breadcrumb"><a href="{{.BasePath}}/">gitea-mq</a> › {{.Forge}}:{{.Owner}}/{{.Name}}</nav>
+        {{template "theme-picker"}}
+    </div>
     <h1>🚦 {{if .RepoURL}}<a href="{{.RepoURL}}">{{.Owner}}/{{.Name}}</a>{{else}}{{.Owner}}/{{.Name}}{{end}}</h1>
     <p class="subtitle">Merge Queue</p>
 

@@ -114,6 +114,28 @@ func TestOverviewShowsRepoAndQueueData(t *testing.T) {
 	}
 }
 
+func TestThemePickerAndScript(t *testing.T) {
+	svc, _, _ := testutil.TestQueueService(t)
+	deps := newDeps(svc, nil)
+	deps.BasePath = "/mq"
+
+	body := getPage(t, deps, "/")
+	if !strings.Contains(body, `<script src="/mq/static/theme.js">`) {
+		t.Error("expected theme script under the base path")
+	}
+	for _, opt := range []string{"system", "light", "dark"} {
+		if !strings.Contains(body, `<option value="`+opt+`">`) {
+			t.Errorf("expected %q option in theme picker", opt)
+		}
+	}
+
+	rec := httptest.NewRecorder()
+	web.NewMux(deps).ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/static/theme.js", nil))
+	if rec.Code != http.StatusOK || !strings.HasPrefix(rec.Header().Get("Content-Type"), "text/javascript") {
+		t.Fatalf("GET /static/theme.js: got %d %q", rec.Code, rec.Header().Get("Content-Type"))
+	}
+}
+
 func TestOverviewNoReposShowsHelpMessage(t *testing.T) {
 	svc, _, _ := testutil.TestQueueService(t)
 

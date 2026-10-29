@@ -265,8 +265,9 @@ allows a merge. It resolves this in order:
 
 A small web dashboard shows queue status across all managed repos, lets you
 drill into individual repos to see queued PRs, and inspect check results per
-PR. It auto-refreshes without JavaScript. There is also a `/healthz` endpoint
-for monitoring.
+PR. It auto-refreshes without JavaScript. It follows the system light/dark
+setting by default; a small script adds a picker to pin light or dark per
+browser. There is also a `/healthz` endpoint for monitoring.
 
 Repo and PR pages live under `/repo/{forge}/{owner}/{name}` (e.g.
 `/repo/github/org/app/pr/42`). Paths without the forge segment resolve as Gitea

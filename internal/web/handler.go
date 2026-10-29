@@ -18,7 +18,7 @@ import (
 	"github.com/Mic92/gitea-mq/internal/store/pg"
 )
 
-//go:embed templates/*.html templates/*.css
+//go:embed templates/*.html templates/*.css templates/*.js
 var templateFS embed.FS
 
 // funcMap provides template helper functions.
@@ -183,7 +183,8 @@ type Deps struct {
 // NewMux creates an http.ServeMux with the dashboard routes registered.
 func NewMux(deps *Deps) *http.ServeMux {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/static/style.css", staticCSSHandler)
+	mux.HandleFunc("/static/style.css", staticHandler("style.css", "text/css; charset=utf-8"))
+	mux.HandleFunc("/static/theme.js", staticHandler("theme.js", "text/javascript; charset=utf-8"))
 	mux.HandleFunc("/{$}", overviewHandler(deps))
 	repo := repoHandler(deps)
 	mux.HandleFunc("/repo/{forge}/{owner}/{name}", repo)
@@ -195,16 +196,18 @@ func NewMux(deps *Deps) *http.ServeMux {
 	return mux
 }
 
-// staticCSSHandler serves the shared stylesheet from the embedded FS.
-func staticCSSHandler(w http.ResponseWriter, _ *http.Request) {
-	data, err := templateFS.ReadFile("templates/style.css")
-	if err != nil {
-		http.Error(w, "not found", http.StatusNotFound)
-		return
+// staticHandler serves a shared asset from the embedded FS.
+func staticHandler(name, contentType string) http.HandlerFunc {
+	return func(w http.ResponseWriter, _ *http.Request) {
+		data, err := templateFS.ReadFile("templates/" + name)
+		if err != nil {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", contentType)
+		w.Header().Set("Cache-Control", "public, max-age=3600")
+		_, _ = w.Write(data)
 	}
-	w.Header().Set("Content-Type", "text/css; charset=utf-8")
-	w.Header().Set("Cache-Control", "public, max-age=3600")
-	_, _ = w.Write(data)
 }
 
 // overviewHandler serves the overview page at GET /.

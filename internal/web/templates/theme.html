@@ -1,0 +1,9 @@
+{{/* Shared theme partials; the argument is the dashboard's BasePath. */}}
+{{define "theme-head"}}<script src="{{.}}/static/theme.js"></script>{{end}}
+{{define "theme-picker"}}<label class="theme-picker" hidden>Theme
+        <select id="theme">
+            <option value="system">System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+        </select>
+    </label>{{end}}

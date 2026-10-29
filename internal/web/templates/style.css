@@ -1,39 +1,70 @@
-body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 20px; background: #f6f8fa; color: #24292f; }
+/* Colours follow the OS setting unless the theme picker pins one
+   (theme.js sets data-theme on <html>). */
+:root { color-scheme: light dark;
+  --bg: light-dark(#f6f8fa, #0d1117);
+  --surface: light-dark(#fff, #161b22);
+  --header-bg: light-dark(#f6f8fa, #161b22);
+  --border: light-dark(#d0d7de, #30363d);
+  --fg: light-dark(#24292f, #e6edf3);
+  --muted: light-dark(#57606a, #8b949e);
+  --link: light-dark(#0969da, #4493f8);
+  --blue-bg: light-dark(#ddf4ff, rgba(56, 139, 253, 0.15));
+  --blue-fg: light-dark(#0969da, #58a6ff);
+  --green-bg: light-dark(#dafbe1, rgba(46, 160, 67, 0.15));
+  --green-fg: light-dark(#116329, #3fb950);
+  --yellow-bg: light-dark(#fff8c5, rgba(187, 128, 9, 0.15));
+  --yellow-fg: light-dark(#9a6700, #d29922);
+  --red-bg: light-dark(#ffebe9, rgba(248, 81, 73, 0.15));
+  --red-fg: light-dark(#cf222e, #f85149);
+  --gray-bg: light-dark(#eaeef2, rgba(110, 118, 129, 0.2));
+  --gray-fg: light-dark(#57606a, #8b949e);
+  --purple-bg: light-dark(#fbefff, rgba(163, 113, 247, 0.15));
+  --purple-fg: light-dark(#8250df, #a371f7);
+  --forge-github-bg: light-dark(#24292f, #484f58);
+}
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; margin: 0; padding: 20px; background: var(--bg); color: var(--fg); }
 h1 { margin-bottom: 4px; }
 h2 { margin-top: 0; }
-.subtitle { color: #57606a; margin-bottom: 24px; }
-table { border-collapse: collapse; width: 100%; max-width: 900px; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; overflow: hidden; margin-bottom: 24px; }
-th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid #d0d7de; }
-th { background: #f6f8fa; font-weight: 600; }
+.subtitle { color: var(--muted); margin-bottom: 24px; }
+table { border-collapse: collapse; width: 100%; max-width: 900px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; overflow: hidden; margin-bottom: 24px; }
+th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--border); }
+th { background: var(--header-bg); font-weight: 600; }
 tr:last-child td { border-bottom: none; }
-a { color: #0969da; text-decoration: none; }
+a { color: var(--link); text-decoration: none; }
 a:hover { text-decoration: underline; }
 .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-.badge-empty { background: #ddf4ff; color: #0969da; }
-.badge-active { background: #dafbe1; color: #116329; }
+.badge-empty { background: var(--blue-bg); color: var(--blue-fg); }
+.badge-active { background: var(--green-bg); color: var(--green-fg); }
 .state { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 600; }
-.state-queued { background: #ddf4ff; color: #0969da; }
-.state-testing { background: #fff8c5; color: #9a6700; }
-.state-success { background: #dafbe1; color: #116329; }
-.state-failed { background: #ffebe9; color: #cf222e; }
-.state-cancelled { background: #eaeef2; color: #57606a; }
+.state-queued { background: var(--blue-bg); color: var(--blue-fg); }
+.state-testing { background: var(--yellow-bg); color: var(--yellow-fg); }
+.state-success { background: var(--green-bg); color: var(--green-fg); }
+.state-failed { background: var(--red-bg); color: var(--red-fg); }
+.state-cancelled { background: var(--gray-bg); color: var(--gray-fg); }
 .bucket { display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.85em; margin-left: 4px; }
-.bucket-current { background: #fff8c5; color: #9a6700; }
-.bucket-pending { background: #eaeef2; color: #57606a; }
-.bucket-landed  { background: #dafbe1; color: #116329; }
-.bucket-ejected { background: #ffebe9; color: #cf222e; }
-.bucket-priority { background: #fbefff; color: #8250df; }
-.batch-header { padding: 8px 12px; background: #f6f8fa; border-left: 3px solid #9a6700; }
+.bucket-current { background: var(--yellow-bg); color: var(--yellow-fg); }
+.bucket-pending { background: var(--gray-bg); color: var(--gray-fg); }
+.bucket-landed  { background: var(--green-bg); color: var(--green-fg); }
+.bucket-ejected { background: var(--red-bg); color: var(--red-fg); }
+.bucket-priority { background: var(--purple-bg); color: var(--purple-fg); }
+.batch-header { padding: 8px 12px; background: var(--header-bg); border-left: 3px solid var(--yellow-fg); }
 .check-icon { font-size: 16px; }
-.empty { color: #57606a; font-style: italic; }
+.empty { color: var(--muted); font-style: italic; }
 .section { max-width: 900px; }
-.breadcrumb { color: #57606a; margin-bottom: 16px; font-size: 14px; }
-.breadcrumb a { color: #0969da; text-decoration: none; }
+.breadcrumb { color: var(--muted); margin-bottom: 16px; font-size: 14px; }
+.breadcrumb a { color: var(--link); text-decoration: none; }
 .breadcrumb a:hover { text-decoration: underline; }
 .repo-list { max-width: 900px; }
-.repo-item { padding: 12px 16px; background: #fff; border: 1px solid #d0d7de; border-radius: 6px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
+.repo-item { padding: 12px 16px; background: var(--surface); border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; display: flex; align-items: center; gap: 8px; }
 .repo-item a { font-weight: 600; }
 
 .forge-badge { font-size: 0.7em; padding: 1px 6px; border-radius: 3px; text-transform: uppercase; letter-spacing: 0.04em; vertical-align: middle; }
 .forge-gitea { background: #609926; color: #fff; }
-.forge-github { background: #24292f; color: #fff; }
+.forge-github { background: var(--forge-github-bg); color: #fff; }
+
+.topbar { display: flex; justify-content: space-between; align-items: baseline; gap: 16px; }
+.theme-picker { font-size: 14px; color: var(--muted); }
+.theme-picker select { font: inherit; color: var(--fg); background: var(--surface); border: 1px solid var(--border); border-radius: 6px; padding: 2px 6px; }

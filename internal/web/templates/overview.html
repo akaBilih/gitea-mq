@@ -6,9 +6,13 @@
     <meta http-equiv="refresh" content="{{.RefreshInterval}}">
     <title>gitea-mq – Merge Queue</title>
     <link rel="stylesheet" href="{{.BasePath}}/static/style.css">
+    {{template "theme-head" .BasePath}}
 </head>
 <body>
-    <nav class="breadcrumb">gitea-mq</nav>
+    <div class="topbar">
+        <nav class="breadcrumb">gitea-mq</nav>
+        {{template "theme-picker"}}
+    </div>
     <h1>🚦 gitea-mq</h1>
     <p class="subtitle">Merge Queue Overview</p>
 

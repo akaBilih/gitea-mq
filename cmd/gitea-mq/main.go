@@ -61,6 +61,7 @@ func run() error {
 		"github", cfg.Github != nil,
 		"poll_interval", cfg.PollInterval,
 		"idle_poll_interval", cfg.IdlePollInterval,
+		"branch_sweep_interval", cfg.BranchSweepInterval,
 		"check_timeout", cfg.CheckTimeout,
 		"batch_max", cfg.BatchMax,
 	)
@@ -123,6 +124,7 @@ func run() error {
 		ExternalURL:         cfg.ExternalURL,
 		PollInterval:        cfg.PollInterval,
 		IdlePollInterval:    cfg.IdlePollInterval,
+		BranchSweepInterval: cfg.BranchSweepInterval,
 		CheckTimeout:        cfg.CheckTimeout,
 		FallbackChecks:      cfg.RequiredChecks,
 		MergeLabel:          cfg.MergeLabel,

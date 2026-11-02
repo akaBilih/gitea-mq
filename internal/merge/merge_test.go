@@ -329,3 +329,78 @@ func TestCleanupStaleBranches_DeleteErrorContinues(t *testing.T) {
 		t.Fatalf("expected 2 delete attempts, got %d", callCount)
 	}
 }
+
+// StaleSweeper waits for a second sighting, keeps spared and active branches,
+// and retries a delete that failed.
+func TestStaleSweeper_DeletesOnSecondSighting(t *testing.T) {
+	mock, f, svc, ctx, repoID := setup(t)
+
+	active := merge.BranchName(10)
+	spared := merge.BranchName(20)
+	stale := merge.BranchName(99)
+
+	if _, err := svc.Enqueue(ctx, repoID, 10, "sha10", "main", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMergeBranch(ctx, repoID, 10, active, "mergesha10"); err != nil {
+		t.Fatal(err)
+	}
+
+	mock.ListBranchesFn = func(_ context.Context, _, _ string) ([]gitea.Branch, error) {
+		return []gitea.Branch{{Name: "main"}, {Name: active}, {Name: spared}, {Name: stale}}, nil
+	}
+	failDelete := true
+	mock.DeleteBranchFn = func(_ context.Context, _, _, _ string) error {
+		if failDelete {
+			return fmt.Errorf("forge down")
+		}
+		return nil
+	}
+
+	s := &merge.StaleSweeper{
+		Forge: f, Queue: svc, Owner: "org", Repo: "app", RepoID: repoID,
+		Spare: func(context.Context) ([]string, error) { return []string{spared}, nil },
+	}
+
+	if n := s.Sweep(ctx); n != 0 || len(mock.CallsTo("DeleteBranch")) != 0 {
+		t.Fatalf("first sighting must not delete: n=%d calls=%d", n, len(mock.CallsTo("DeleteBranch")))
+	}
+	if n := s.Sweep(ctx); n != 0 || len(mock.CallsTo("DeleteBranch")) != 1 {
+		t.Fatalf("failed delete must not count: n=%d calls=%d", n, len(mock.CallsTo("DeleteBranch")))
+	}
+	failDelete = false
+	if n := s.Sweep(ctx); n != 1 {
+		t.Fatalf("expected the failed delete to be retried, deleted %d", n)
+	}
+	for _, c := range mock.CallsTo("DeleteBranch") {
+		if c.Args[2] != stale {
+			t.Fatalf("deleted %v, only %s is stale", c.Args[2], stale)
+		}
+	}
+	if n := s.Sweep(ctx); n != 0 {
+		t.Fatalf("nothing left to delete, got %d", n)
+	}
+}
+
+// A branch that becomes claimed between sightings is forgotten, not deleted.
+func TestStaleSweeper_ClaimedBranchIsForgotten(t *testing.T) {
+	mock, f, svc, ctx, repoID := setup(t)
+
+	branch := merge.BranchName(7)
+	mock.ListBranchesFn = func(_ context.Context, _, _ string) ([]gitea.Branch, error) {
+		return []gitea.Branch{{Name: branch}}, nil
+	}
+	s := &merge.StaleSweeper{Forge: f, Queue: svc, Owner: "org", Repo: "app", RepoID: repoID}
+
+	s.Sweep(ctx) // seen once
+	if _, err := svc.Enqueue(ctx, repoID, 7, "sha7", "main", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := svc.SetMergeBranch(ctx, repoID, 7, branch, "mergesha7"); err != nil {
+		t.Fatal(err)
+	}
+	s.Sweep(ctx) // now claimed
+	if got := len(mock.CallsTo("DeleteBranch")); got != 0 {
+		t.Fatalf("claimed branch deleted (%d calls)", got)
+	}
+}

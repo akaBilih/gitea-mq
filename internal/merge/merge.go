@@ -143,13 +143,13 @@ func CleanupMergeBranch(ctx context.Context, f forge.Forge, owner, repo string, 
 	}
 }
 
-// CleanupStaleBranches deletes orphaned gitea-mq/* branches not referenced by
-// any active queue entry or live batch. Called on startup to clean up after
-// crashes. spare lists additional branch names to keep (live batch branches).
-func CleanupStaleBranches(ctx context.Context, f forge.Forge, svc *queue.Service, owner, repo string, repoID int64, spare []string) error {
+// FindStaleBranches lists gitea-mq/* branches not referenced by any active
+// queue entry or live batch. spare lists additional branch names to keep. It
+// also returns how many branches were kept.
+func FindStaleBranches(ctx context.Context, f forge.Forge, svc *queue.Service, owner, repo string, repoID int64, spare []string) (stale []string, kept int, err error) {
 	activeEntries, err := svc.ListActiveEntries(ctx, repoID)
 	if err != nil {
-		return fmt.Errorf("list active entries: %w", err)
+		return nil, 0, fmt.Errorf("list active entries: %w", err)
 	}
 
 	activeBranches := make(map[string]bool, len(activeEntries)+len(spare))
@@ -164,27 +164,95 @@ func CleanupStaleBranches(ctx context.Context, f forge.Forge, svc *queue.Service
 
 	branches, err := f.ListBranches(ctx, owner, repo)
 	if err != nil {
-		return fmt.Errorf("list branches: %w", err)
+		return nil, 0, fmt.Errorf("list branches: %w", err)
 	}
 
-	var deleted int
 	for _, b := range branches {
-		if !strings.HasPrefix(b, BranchPrefix) {
-			continue
+		if strings.HasPrefix(b, BranchPrefix) && !activeBranches[b] {
+			stale = append(stale, b)
 		}
-		if activeBranches[b] {
-			continue
-		}
+	}
+	return stale, len(activeBranches), nil
+}
 
+// deleteBranches deletes each branch and returns the ones that are gone.
+func deleteBranches(ctx context.Context, f forge.Forge, owner, repo string, branches []string) (deleted map[string]bool) {
+	deleted = make(map[string]bool, len(branches))
+	for _, b := range branches {
 		slog.Info("deleting stale merge branch", "owner", owner, "repo", repo, "branch", b)
 		if err := f.DeleteBranch(ctx, owner, repo, b); err != nil {
 			slog.Warn("failed to delete stale branch", "branch", b, "error", err)
 			continue
 		}
-		deleted++
+		deleted[b] = true
 	}
+	return deleted
+}
+
+// CleanupStaleBranches deletes orphaned gitea-mq/* branches not referenced by
+// any active queue entry or live batch. Called on startup to clean up after
+// crashes; StaleSweeper repeats it while running. spare lists additional
+// branch names to keep (live batch branches).
+func CleanupStaleBranches(ctx context.Context, f forge.Forge, svc *queue.Service, owner, repo string, repoID int64, spare []string) error {
+	stale, kept, err := FindStaleBranches(ctx, f, svc, owner, repo, repoID, spare)
+	if err != nil {
+		return err
+	}
+	deleted := deleteBranches(ctx, f, owner, repo, stale)
 
 	slog.Info("startup merge branch cleanup", "owner", owner, "repo", repo,
-		"active_branches", len(activeBranches), "stale_deleted", deleted)
+		"active_branches", kept, "stale_deleted", len(deleted))
 	return nil
+}
+
+// StaleSweeper removes orphaned gitea-mq/* branches while the process runs, so
+// a failed delete or an abandoned batch does not wait for the next restart.
+// A branch is only deleted once it has been stale on two consecutive sweeps:
+// a merge or batch branch is created before the database row that claims it,
+// and a single sighting could fall in that window. Not safe for concurrent use.
+type StaleSweeper struct {
+	Forge  forge.Forge
+	Queue  *queue.Service
+	Owner  string
+	Repo   string
+	RepoID int64
+	// Spare returns extra branch names to keep, normally the live batch
+	// branches. A failure skips the sweep: sparing nothing would delete them.
+	Spare func(ctx context.Context) ([]string, error)
+
+	seen map[string]bool
+}
+
+// Sweep runs one pass and returns how many branches it deleted.
+func (s *StaleSweeper) Sweep(ctx context.Context) int {
+	var spare []string
+	if s.Spare != nil {
+		var err error
+		if spare, err = s.Spare(ctx); err != nil {
+			slog.Warn("stale branch sweep skipped", "owner", s.Owner, "repo", s.Repo, "error", err)
+			return 0
+		}
+	}
+	stale, _, err := FindStaleBranches(ctx, s.Forge, s.Queue, s.Owner, s.Repo, s.RepoID, spare)
+	if err != nil {
+		slog.Warn("stale branch sweep failed", "owner", s.Owner, "repo", s.Repo, "error", err)
+		return 0
+	}
+
+	var confirmed []string
+	for _, b := range stale {
+		if s.seen[b] {
+			confirmed = append(confirmed, b)
+		}
+	}
+	deleted := deleteBranches(ctx, s.Forge, s.Owner, s.Repo, confirmed)
+
+	// Keep the ones still there (first sighting, or a delete that failed).
+	s.seen = make(map[string]bool, len(stale))
+	for _, b := range stale {
+		if !deleted[b] {
+			s.seen[b] = true
+		}
+	}
+	return len(deleted)
 }

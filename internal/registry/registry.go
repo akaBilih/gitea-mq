@@ -35,6 +35,7 @@ type Deps struct {
 	ExternalURL         string
 	PollInterval        time.Duration
 	IdlePollInterval    time.Duration
+	BranchSweepInterval time.Duration
 	CheckTimeout        time.Duration
 	FallbackChecks      []string
 	MergeLabel          string
@@ -165,6 +166,13 @@ func (r *RepoRegistry) Add(ctx context.Context, ref forge.RepoRef) error {
 		cancel: cancel,
 	}
 
+	sweeper := &merge.StaleSweeper{
+		Forge: f, Queue: r.deps.Queue, Owner: ref.Owner, Repo: ref.Name, RepoID: repo.ID,
+	}
+	if batchEngine != nil {
+		sweeper.Spare = batchEngine.LiveBranchNames
+	}
+
 	pollerDeps := &poller.Deps{
 		Forge:               f,
 		Queue:               r.deps.Queue,
@@ -182,6 +190,8 @@ func (r *RepoRegistry) Add(ctx context.Context, ref forge.RepoRef) error {
 		SkipQueueIfUpToDate: r.deps.SkipQueueIfUpToDate,
 		Batch:               batchEngine,
 		IdleGating:          f.Capabilities().StatusWebhook,
+		SweepInterval:       r.deps.BranchSweepInterval,
+		Sweep:               func(ctx context.Context) { sweeper.Sweep(ctx) },
 	}
 	go poller.Run(pollerCtx, pollerDeps, r.deps.PollInterval, r.deps.IdlePollInterval)
 

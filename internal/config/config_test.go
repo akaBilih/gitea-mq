@@ -280,3 +280,30 @@ func TestLoad_GiteaOnlyStillWorks(t *testing.T) {
 		t.Errorf("Repos() = %+v", cfg.Repos())
 	}
 }
+
+func TestLoad_BranchSweepIntervalDefaultAndOverride(t *testing.T) {
+	base := map[string]string{
+		"GITEA_MQ_GITEA_URL":      "https://gitea.example.com/",
+		"GITEA_MQ_GITEA_TOKEN":    "tok",
+		"GITEA_MQ_WEBHOOK_SECRET": "sec",
+		"GITEA_MQ_REPOS":          "org/app",
+	}
+	setEnv(t, with(base))
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BranchSweepInterval != 10*time.Minute {
+		t.Errorf("BranchSweepInterval = %v, want 10m default", cfg.BranchSweepInterval)
+	}
+
+	base["GITEA_MQ_BRANCH_SWEEP_INTERVAL"] = "2m"
+	setEnv(t, with(base))
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if cfg.BranchSweepInterval != 2*time.Minute {
+		t.Errorf("BranchSweepInterval = %v, want 2m", cfg.BranchSweepInterval)
+	}
+}

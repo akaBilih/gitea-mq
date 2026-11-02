@@ -54,6 +54,14 @@ type Deps struct {
 	// work. Safe only on forges that deliver CI status via webhooks (GitHub,
 	// Gitea >= 1.24); must stay false for forges that need status polling.
 	IdleGating bool
+	// Sweep, when non-nil, runs every SweepInterval to remove orphaned branches.
+	// It runs on the poller goroutine, after any reconcile in progress.
+	Sweep func(ctx context.Context)
+	// SweepInterval defaults to DefaultSweepInterval.
+	SweepInterval time.Duration
+	// SweepTicks replaces the sweep ticker when non-nil, for tests.
+	SweepTicks <-chan time.Time
+
 	// Now overrides the wall clock in timeout checks; nil means time.Now.
 	// Tests use it instead of sleeping past real timeouts.
 	Now func() time.Time
@@ -757,6 +765,9 @@ func hasActiveWork(ctx context.Context, deps *Deps) bool {
 	return len(entries) > 0
 }
 
+// DefaultSweepInterval is how often orphaned gitea-mq/* branches are swept.
+const DefaultSweepInterval = 10 * time.Minute
+
 func notifyTickDone(deps *Deps) {
 	if deps.TickDone != nil {
 		deps.TickDone <- struct{}{}
@@ -802,6 +813,17 @@ func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) 
 	}
 	lastFull := time.Now()
 
+	sweepTicks := deps.SweepTicks
+	if deps.Sweep != nil && sweepTicks == nil {
+		every := deps.SweepInterval
+		if every <= 0 {
+			every = DefaultSweepInterval
+		}
+		sweeper := time.NewTicker(every)
+		defer sweeper.Stop()
+		sweepTicks = sweeper.C
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -810,6 +832,11 @@ func Run(ctx context.Context, deps *Deps, interval, idleInterval time.Duration) 
 		case <-deps.Trigger:
 			doPoll(false)
 			lastFull = time.Now()
+			notifyTickDone(deps)
+		case <-sweepTicks:
+			if deps.Sweep != nil {
+				deps.Sweep(ctx)
+			}
 			notifyTickDone(deps)
 		case <-ticks:
 			skipIdle := deps.IdleGating && !hasActiveWork(ctx, deps) && time.Since(lastFull) < idleInterval

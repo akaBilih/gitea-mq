@@ -142,6 +142,14 @@ in
       '';
     };
 
+    branchSweepInterval = lib.mkOption {
+      type = lib.types.str;
+      default = "10m";
+      description = ''
+        How often orphaned gitea-mq/* branches are removed while running.
+      '';
+    };
+
     priorityLabel = lib.mkOption {
       type = lib.types.str;
       default = "";
@@ -300,6 +308,7 @@ in
         GITEA_MQ_EXTERNAL_URL = cfg.externalUrl;
         GITEA_MQ_POLL_INTERVAL = cfg.pollInterval;
         GITEA_MQ_IDLE_POLL_INTERVAL = cfg.idlePollInterval;
+        GITEA_MQ_BRANCH_SWEEP_INTERVAL = cfg.branchSweepInterval;
         GITEA_MQ_CHECK_TIMEOUT = cfg.checkTimeout;
         GITEA_MQ_PRIORITY_LABEL = cfg.priorityLabel;
         GITEA_MQ_SKIP_QUEUE_IF_UP_TO_DATE = lib.boolToString cfg.skipQueueIfUpToDate;

@@ -24,6 +24,7 @@ type Config struct {
 	BasePath            string
 	PollInterval        time.Duration
 	IdlePollInterval    time.Duration
+	BranchSweepInterval time.Duration
 	CheckTimeout        time.Duration
 	RequiredChecks      []string
 	MergeLabel          string
@@ -123,6 +124,12 @@ func Load() (*Config, error) {
 	// Idle repos are driven by webhooks; this periodic reconcile is only a
 	// safety net for deliveries missed during downtime, so it can run rarely.
 	cfg.IdlePollInterval, err = parseDurationOrDefault("GITEA_MQ_IDLE_POLL_INTERVAL", 15*time.Minute)
+	if err != nil {
+		return nil, err
+	}
+	// Orphaned gitea-mq/* branches (a failed delete, an abandoned batch) are
+	// removed on this cadence while running, not only at startup.
+	cfg.BranchSweepInterval, err = parseDurationOrDefault("GITEA_MQ_BRANCH_SWEEP_INTERVAL", 10*time.Minute)
 	if err != nil {
 		return nil, err
 	}

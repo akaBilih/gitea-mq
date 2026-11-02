@@ -1,3 +1,4 @@
+| `GITEA_MQ_BRANCH_SWEEP_INTERVAL` | no | `10m` | How often orphaned `gitea-mq/*` branches (left by a failed delete or an abandoned batch) are removed while running. A branch is deleted only after two consecutive sweeps find it unclaimed. Startup also cleans once |
 # gitea-mq
 
 Status: stable

@@ -88,3 +88,25 @@ func (f *githubForge) DeleteLabel(ctx context.Context, owner, name, label string
 	}
 	return mapLabelErr(err)
 }
+
+func (f *githubForge) ListLabels(ctx context.Context, owner, name string) ([]string, error) {
+	c, err := f.app.ClientForRepo(owner, name)
+	if err != nil {
+		return nil, err
+	}
+	var out []string
+	opts := &gh.ListOptions{PerPage: 100}
+	for {
+		ls, resp, err := c.Issues.ListLabels(ctx, owner, name, opts)
+		if err != nil {
+			return nil, mapLabelErr(err)
+		}
+		for _, l := range ls {
+			out = append(out, l.GetName())
+		}
+		if resp.NextPage == 0 {
+			return out, nil
+		}
+		opts.Page = resp.NextPage
+	}
+}

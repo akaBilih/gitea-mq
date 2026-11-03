@@ -14,4 +14,7 @@ type Labeler interface {
 	ApplyLabels(ctx context.Context, owner, name string, number int64, add, remove []string) error
 	// DeleteLabel removes the label from the repo and every PR; missing is not an error.
 	DeleteLabel(ctx context.Context, owner, name, label string) error
+	// ListLabels returns the names of every label defined on the repo (not just
+	// those on open PRs), read from the forge rather than a cache.
+	ListLabels(ctx context.Context, owner, name string) ([]string, error)
 }

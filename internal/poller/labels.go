@@ -201,3 +201,51 @@ func filterOut(labels []string, prefix string) []string {
 	}
 	return out
 }
+
+// SweepBatchLabels deletes batch labels that no live batch owns. syncStateLabels
+// only deletes a batch label it sees on an open PR, so when a batch lands and
+// every member merges, nothing lists the label again and it stays on the repo.
+// Reads the repo's labels, so run it on a slow timer, not every poll. It runs
+// on the poller goroutine, the only place batch labels are created, so a live
+// batch's label cannot appear between the two reads.
+func SweepBatchLabels(ctx context.Context, deps *Deps) int {
+	if deps.LabelPrefix == "" || deps.labelsDisabled {
+		return 0
+	}
+	labeler, ok := deps.Forge.(forge.Labeler)
+	if !ok {
+		return 0
+	}
+	live, err := deps.Queue.ListLiveBatches(ctx, deps.RepoID)
+	if err != nil {
+		slog.Warn("batch label sweep skipped", "owner", deps.Owner, "repo", deps.Repo, "error", err)
+		return 0
+	}
+	keep := make(map[string]bool, len(live))
+	for _, b := range live {
+		keep[strings.ToLower(fmt.Sprintf("%s%s%d", deps.LabelPrefix, labelBatch, b.ID))] = true
+	}
+	labels, err := labeler.ListLabels(ctx, deps.Owner, deps.Repo)
+	if err != nil {
+		handleLabelErr(deps, err)
+		slog.Warn("batch label sweep failed", "owner", deps.Owner, "repo", deps.Repo, "error", err)
+		return 0
+	}
+	prefix := deps.LabelPrefix + labelBatch
+	var deleted int
+	for _, l := range labels {
+		if !hasPrefixFold(l, prefix) || keep[strings.ToLower(l)] {
+			continue
+		}
+		if err := labeler.DeleteLabel(ctx, deps.Owner, deps.Repo, l); err != nil {
+			if handleLabelErr(deps, err) {
+				return deleted
+			}
+			slog.Warn("failed to delete stale batch label", "label", l, "error", err)
+			continue
+		}
+		slog.Info("deleted stale batch label", "owner", deps.Owner, "repo", deps.Repo, "label", l)
+		deleted++
+	}
+	return deleted
+}

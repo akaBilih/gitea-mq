@@ -191,7 +191,10 @@ func (r *RepoRegistry) Add(ctx context.Context, ref forge.RepoRef) error {
 		Batch:               batchEngine,
 		IdleGating:          f.Capabilities().StatusWebhook,
 		SweepInterval:       r.deps.BranchSweepInterval,
-		Sweep:               func(ctx context.Context) { sweeper.Sweep(ctx) },
+	}
+	pollerDeps.Sweep = func(ctx context.Context) {
+		sweeper.Sweep(ctx)
+		poller.SweepBatchLabels(ctx, pollerDeps)
 	}
 	go poller.Run(pollerCtx, pollerDeps, r.deps.PollInterval, r.deps.IdlePollInterval)
 

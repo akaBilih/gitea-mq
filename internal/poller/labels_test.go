@@ -232,3 +232,50 @@ func TestStateLabelBatchMembersAndLabelCleanup(t *testing.T) {
 		t.Fatalf("DeleteLabel calls = %v, want one for %s", del, want)
 	}
 }
+
+// A batch label no open PR carries any more (every member merged) is only
+// found by listing the repo's labels.
+func TestSweepBatchLabelsDeletesOrphansOnly(t *testing.T) {
+	deps, mock, svc, ctx, repoID := setupStateLabelTest(t)
+	deps.Batch = &batch.Engine{
+		Forge: mock, Queue: svc, Owner: "org", Repo: "app", RepoID: repoID, BatchMax: 5,
+		SkipIfUpToDate: true, MergedPollInterval: 1, MergedPollAttempts: 1,
+	}
+	mock.CreateMergeBranchFn = func(context.Context, string, string, string, string, string) (string, bool, error) {
+		return "tip", false, nil
+	}
+	mock.MergeIntoFn = func(context.Context, string, string, string, string) (string, bool, error) {
+		return "tip", false, nil
+	}
+	mock.ListOpenPRsFn = openPRs(
+		forge.PR{Number: 1, State: "open", HeadSHA: "h1", BaseBranch: "main", Labels: []string{"merge-queue"}},
+	)
+	if _, err := poller.PollOnce(ctx, deps); err != nil {
+		t.Fatal(err)
+	}
+	live, err := svc.GetLiveBatch(ctx, repoID, "main")
+	if err != nil || live == nil {
+		t.Fatalf("live batch = %v, err = %v", live, err)
+	}
+	liveLabel := fmt.Sprintf("mq/batch-%d", live.ID)
+	stale := "mq/batch-9999"
+	mock.ListLabelsFn = func(context.Context, string, string) ([]string, error) {
+		return []string{liveLabel, stale, "mq/waiting", "merge-queue", "batch-1"}, nil
+	}
+
+	if n := poller.SweepBatchLabels(ctx, deps); n != 1 {
+		t.Fatalf("deleted %d labels, want 1", n)
+	}
+	del := mock.CallsTo("DeleteLabel")
+	if len(del) != 1 || del[0].Args[2] != stale {
+		t.Fatalf("DeleteLabel calls = %v, want only %s", del, stale)
+	}
+
+	// Once the batch is gone its label is an orphan too.
+	if err := svc.CancelLiveBatches(ctx, repoID); err != nil {
+		t.Fatal(err)
+	}
+	if n := poller.SweepBatchLabels(ctx, deps); n != 2 {
+		t.Fatalf("after cancel deleted %d labels, want 2 (live label and stale)", n)
+	}
+}

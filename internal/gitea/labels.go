@@ -176,3 +176,17 @@ func (f *giteaForge) DeleteLabel(ctx context.Context, owner, name, label string)
 	delete(c.byName, strings.ToLower(label))
 	return nil
 }
+
+func (f *giteaForge) ListLabels(ctx context.Context, owner, name string) ([]string, error) {
+	c := f.labelCache(owner, name)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if err := c.load(ctx, f, owner, name, true); err != nil {
+		return nil, mapLabelErr(err)
+	}
+	out := make([]string, 0, len(c.byName))
+	for _, l := range c.byName {
+		out = append(out, l.Name)
+	}
+	return out, nil
+}

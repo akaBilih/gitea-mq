@@ -45,6 +45,7 @@ type MockForge struct {
 	OpenDependenciesFn  func(ctx context.Context, owner, name string, number int64) ([]Dependency, error)
 	ApplyLabelsFn       func(ctx context.Context, owner, name string, number int64, add, remove []string) error
 	DeleteLabelFn       func(ctx context.Context, owner, name, label string) error
+	ListLabelsFn        func(ctx context.Context, owner, name string) ([]string, error)
 	CanPushFn           func(ctx context.Context, owner, name, branch string) (bool, error)
 }
 
@@ -87,6 +88,14 @@ func (m *MockForge) DeleteLabel(ctx context.Context, owner, name, label string) 
 		return m.DeleteLabelFn(ctx, owner, name, label)
 	}
 	return nil
+}
+
+func (m *MockForge) ListLabels(ctx context.Context, owner, name string) ([]string, error) {
+	m.record("ListLabels", owner, name)
+	if m.ListLabelsFn != nil {
+		return m.ListLabelsFn(ctx, owner, name)
+	}
+	return nil, nil
 }
 
 func (m *MockForge) MergePR(ctx context.Context, owner, name string, number int64) error {
